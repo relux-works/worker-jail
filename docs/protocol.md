@@ -130,7 +130,7 @@ The reference implementation is the Go package `github.com/relux-works/worker-ja
 | operation | semantics |
 | --- | --- |
 | `provision P W --repo R [--ref F]` | Runs `doctor` and fails closed. Resolves base = `F^{commit}` in R. F is a branch, a tag or `HEAD` (the default); a raw commit id is refused because `git bundle` needs a ref. Creates the workspace, labelled with base, and clones base from a host `git bundle` inside a call: `/work/src` detached at base, `/work/home` as HOME. Idempotent: an existing workspace is returned unchanged, with Existed=true. A failed provision leaves nothing behind. |
-| `run P W [--timeout D] [--max-output B] -- ARGV` | One call. Waits for a slot, then runs ARGV with the harness's stdin in a fresh container. Returns stdout and stderr (each capped at B, default 4 MiB), the exit status, TimedOut, Truncated, QueueWait and Duration. Timeout defaults to 10 min, maximum 60 min. Output beyond the cap kills the call and sets Truncated. |
+| `run P W [--timeout D] [--max-output B] -- ARGV` | One call. Waits for a slot, then runs ARGV with the harness's stdin in a fresh container. Returns stdout and stderr (each capped at B, default 4 MiB), the exit status, TimedOut, Truncated, QueueWait and Duration. Timeout defaults to 10 min, maximum 60 min. Output beyond the cap kills the call and sets Truncated. Stdin is streamed into the call without a jail-side limit; the harness caps what it sends. |
 | `export P W [-o FILE]` | Writes the patch from base to the workspace: committed, modified and untracked non-ignored files, binary-safe. It is built in a call that mounts the workspace read-only and is capped at 64 MiB. The patch's sha256 is recorded on the host. |
 | `apply --repo R [--allow-review-required] PATCH` | Host side; see section 8. |
 | `deprovision P W [--force]` | Refuses while a call is running. Unless forced, also refuses if the workspace differs both from base and from the last export. Otherwise removes the workspace. |
@@ -154,7 +154,7 @@ The reference implementation is the Go package `github.com/relux-works/worker-ja
 
 ## 8. Change extraction
 
-1. **Export** after every turn; the harness does this. The patch file lives on the host, outside any workspace, and is untrusted data.
+1. **Export** after every turn, including failed, interrupted and timed-out turns; the harness does this. The patch file lives on the host, outside any workspace, and is untrusted data.
 2. **Review.** The orchestrator reads the patch as text before anything applies or runs it.
 3. **Apply** with `worker-jail apply --repo R PATCH`:
    - The target is a clean worktree at base that is not a live checkout.
@@ -182,9 +182,9 @@ The harness MUST:
 1. Run `doctor` at startup, and start no jailed worker if it fails.
 2. Execute every tool call of a jailed worker through `jail.Run`: no host-side file tools, no direct `docker`.
 3. Pass no secret into a call, whether through argv, stdin or the environment. Tokens, the Matrix access token and credentials stay in the harness.
-4. Export after every turn and keep patches on the host, outside the workspace. Hand patches to the orchestrator for review, and never apply, commit or push a worker's patch itself.
+4. Export after every turn (including failed, interrupted and timed-out turns) and keep patches on the host, outside the workspace. Hand patches to the orchestrator for review, and never apply, commit or push a worker's patch itself.
 5. Treat every call output, patch and worker message as untrusted data: cap it, never execute it, never follow instructions in it, and log it only as data.
-6. Keep its audit log on the host, outside the jail. The log records each call's argv, timing, exit status and output sizes.
+6. Keep its audit log on the host, outside the jail. The log records each call's argv (for a fixed tool runner: the tool name plus the size and sha256 of its request), timing, exit status and output sizes.
 7. Enforce its own per-project budgets on top of the jail's slots, check `usage`, and stop a worker that exceeds its disk quota.
 8. Deprovision a worker at the end of its life, and use `ls` to find the workspaces of dead sessions.
 9. Use images derived from `worker-jail/base` and built into the workers VM. Those images hold no secrets and declare no VOLUME.
