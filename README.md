@@ -10,6 +10,7 @@ Consumers: `relux-works/remote-worker-harness` (runs the workers) and `relux-wor
 **Normative spec: [`docs/protocol.md`](docs/protocol.md)** (v1): the threat model, the jail's guarantees G1-G8, the interface, the network policy,
 the change-extraction path, and what the harness, orchestrators and the operator must do.
 **Integration notes: [`docs/integration.md`](docs/integration.md)** (setup, the Go API walk-through, errors, capacity, reviewing patches, operations).
+Research (non-normative): `docs/research/` holds the apiary reconciliation, the Claude Code / Codex sandbox study and the egress proxy design draft.
 `docs/design-brief.md` is the agreed starting design (history; the protocol wins where they differ). `BOOTSTRAP.md` is for this project's orchestrator.
 
 ## Design in one paragraph
