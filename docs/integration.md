@@ -117,13 +117,13 @@ that survives the turn for `Export` and `Deprovision`, so an interrupted turn is
 ```sh
 less .temp/rwh/w-7f3a/turn-3.patch                                    # 1. read it as text first
 git worktree add --detach .temp/review-w-7f3a <base>                  # 2. clean worktree at base (base= in the export line)
-bin/worker-jail apply --repo .temp/review-w-7f3a .temp/rwh/w-7f3a/turn-3.patch   # 3. prints applied paths
+bin/worker-jail apply --repo .temp/review-w-7f3a --write-scope jail/,docs/integration.md .temp/rwh/w-7f3a/turn-3.patch   # 3. the task's scope; prints applied paths
 git -C .temp/review-w-7f3a switch -c worker/w-7f3a-turn-3
 git -C .temp/review-w-7f3a -c core.hooksPath=/dev/null commit -S -m "..."        # 4. hooks disabled
 git -C .temp/review-w-7f3a -c core.hooksPath=/dev/null push -u origin worker/w-7f3a-turn-3   # 5. then open a PR
 ```
 
-On exit 4 `apply` lists `flagged: <path> (<reason>)` and applies nothing. Read each flagged hunk; re-run with `--allow-review-required` only if every one is acceptable.
+On exit 5 `apply` lists the paths outside the write scope and applies nothing; that is a refusal, not a question (widen the scope only if the task really covers them). On exit 4 it lists `flagged: <path> (<reason>)` and applies nothing. Read each flagged hunk; re-run with `--allow-review-required` only if every one is acceptable.
 
 6. Validate in a jail, never on the host:
 

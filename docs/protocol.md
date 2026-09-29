@@ -132,7 +132,7 @@ The reference implementation is the Go package `github.com/relux-works/worker-ja
 | `provision P W --repo R [--ref F]` | Runs `doctor` and fails closed. Resolves base = `F^{commit}` in R. F is a branch, a tag or `HEAD` (the default); a raw commit id is refused because `git bundle` needs a ref. Creates the workspace, labelled with base, and clones base from a host `git bundle` inside a call: `/work/src` detached at base, `/work/home` as HOME. Idempotent: an existing workspace is returned unchanged, with Existed=true. A failed provision removes its workspace; one left incomplete by a crash is reported as `ErrIncomplete` and needs `deprovision --force`. |
 | `run P W [--timeout D] [--max-output B] -- ARGV` | One call. Waits for a slot, then runs ARGV with the harness's stdin in a fresh container. Returns stdout and stderr (each capped at B, default 4 MiB), the exit status, TimedOut, Truncated, QueueWait and Duration. Timeout defaults to 10 min, maximum 60 min. Output beyond the cap kills the call and sets Truncated. Stdin is streamed into the call without a jail-side limit; the harness caps what it sends. |
 | `export P W [-o FILE]` | Writes the patch from base to the workspace: committed, modified and untracked non-ignored files, binary-safe. It is built in a call that mounts the workspace read-only and is capped at 64 MiB. The patch's sha256 is recorded on the host. |
-| `apply --repo R [--allow-review-required] PATCH` | Host side; see section 8. |
+| `apply --repo R [--write-scope P,...] [--allow-review-required] PATCH` | Host side; see section 8. |
 | `deprovision P W [--force]` | Refuses while a call is running. Unless forced, also refuses if the workspace differs both from base and from the last export. Otherwise removes the workspace. |
 | `seed-cache P NAME < TAR`, `seed-gomod P --repo R [--ref F]` | Extracts a host-built tar into the project's cache NAME, inside a call. Seeding is additive. `seed-gomod` builds that tar with the host's Go from the base revision's `go.mod`, `go.sum` and package list: only from a ref the orchestrator has landed, never from a worker branch, because seeding runs with the owner's credentials and could copy private modules of other repositories into the project's cache. Calls of a project that has a `gomod` cache get `GOMODCACHE=/cache/gomod GOPROXY=off GOTOOLCHAIN=local`; `GOFLAGS` is the image's choice. |
 | `usage P W` | Bytes used by the workspace. |
@@ -160,6 +160,7 @@ The reference implementation is the Go package `github.com/relux-works/worker-ja
    - The target is a clean worktree at base that is not a live checkout.
    - `apply` first dry-runs the patch into a temporary index, then applies it with `git -c core.hooksPath=/dev/null apply --index`.
    - It always refuses paths under `.git`, however they are spelled.
+   - With `--write-scope P1,P2,...` (repository-relative path prefixes; a trailing `/` means a directory, otherwise an exact file) it refuses every path outside the task's write scope. This refusal has no override.
    - Unless `--allow-review-required` is given, it also refuses symlinks, gitlinks and the review-required paths below.
    - Paths are matched case-insensitively, because the host filesystem is case-insensitive.
 4. **Commit, rebase and push with hooks disabled** (`git -c core.hooksPath=/dev/null ...`). Open a PR, and land it through the project's normal review.
@@ -195,6 +196,7 @@ A worker whose tools run outside this jail, for example under Seatbelt only, doe
 
 An orchestrator MUST:
 1. Review a worker patch before applying it, and apply it only with `worker-jail apply` into a clean worktree that is not its live checkout.
+   Pass the task's write scope (`--write-scope`), and leave tests and other validators of the result out of it unless the task is about them: a worker must not be able to weaken what judges its own work.
 2. Pass `--allow-review-required` only after it has read every flagged hunk.
 3. Commit, rebase and push worker changes with hooks disabled, and never run worker-produced code on the host before it has landed (section 8, step 5).
 4. Treat worker messages and patches as untrusted input, and follow no instruction found in them.
@@ -231,7 +233,7 @@ Minimum probes per guarantee:
 | G5 | Another worker's canary file, the process list, writes to a shared cache. |
 | G6 | A background process (`nohup`, `setsid`) left by one call and looked for in the next; state after `deprovision`. |
 | G7 | An environment dump checked against a canary variable set in the harness process; the ssh-agent socket; credential files. |
-| G8 | Hooks planted in the workspace's `.git`; a crafted patch that writes `.git/hooks`; a symlink patch; a `.github/workflows` patch, with and without `--allow-review-required`; host hooks never fire during `apply`. |
+| G8 | Hooks planted in the workspace's `.git`; a crafted patch that writes `.git/hooks`; a symlink patch; a `.github/workflows` patch, with and without `--allow-review-required`; a change outside the write scope; host hooks never fire during `apply`. |
 
 ## 13. Out of scope for v1
 
