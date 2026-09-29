@@ -253,3 +253,109 @@ func TestHostEnvIgnoresGitVars(t *testing.T) {
 		t.Fatal("patch applied to the wrong repo")
 	}
 }
+
+// A scope entry ending in "/" matches every path under that directory at a component boundary,
+// any other entry matches exactly one file, both case-insensitively.
+func TestInWriteScope(t *testing.T) {
+	for _, c := range []struct {
+		scope []string
+		path  string
+		want  bool
+	}{
+		{[]string{"jail/"}, "jail/x.go", true},
+		{[]string{"jail/"}, "jail/sub/deep/x.go", true},
+		{[]string{"JAIL/"}, "jail/x.go", true},
+		{[]string{"jail/"}, "jailbreak.go", false},
+		{[]string{"jail/"}, "jail", false},
+		{[]string{"jail"}, "jailbreak.go", false},
+		{[]string{"jail"}, "jail/x.go", false},
+		{[]string{"Makefile"}, "makefile", true},
+		{[]string{"Makefile"}, "sub/Makefile", false},
+		{[]string{"docs/a/"}, "docs/b/x.md", false},
+		{[]string{"docs/", "Makefile"}, "Makefile", true},
+	} {
+		if got := inWriteScope(c.scope, c.path); got != c.want {
+			t.Errorf("inWriteScope(%q, %q) = %v, want %v", c.scope, c.path, got, c.want)
+		}
+	}
+}
+
+// Malformed or .git-naming scope entries are rejected before the repo is touched; canonical ones pass.
+func TestValidateWriteScope(t *testing.T) {
+	for _, e := range []string{"", "/", "/etc", "a//b", "./a", "a/./b", "a/..", "../x", "a//", ".git/", "sub/.GIT", ".Git"} {
+		if validateWriteScope([]string{"ok/", e}) == nil {
+			t.Errorf("entry %q accepted", e)
+		}
+		if _, err := Apply(context.Background(), "/nonexistent", bytes.NewReader(nil), ApplyOptions{WriteScope: []string{e}}); err == nil || !strings.Contains(err.Error(), "write-scope") {
+			t.Errorf("Apply with entry %q: %v", e, err)
+		}
+	}
+	if err := validateWriteScope([]string{"docs/", "Makefile", "jail/x_test.go", ".github/", "a.git/"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func scopePatch(t *testing.T, repo string) []byte {
+	return makePatch(t, repo, func(d string) {
+		writeFile(t, filepath.Join(d, "Makefile"), "all:\n")
+		writeFile(t, filepath.Join(d, "jail", "x_test.go"), "package jail\n")
+	})
+}
+
+// A patch outside the scope is refused with ErrOutOfScope, even with AllowReviewRequired, and changes nothing.
+func TestApplyOutOfScope(t *testing.T) {
+	repo := newRepo(t)
+	rep, err := Apply(context.Background(), repo, bytes.NewReader(scopePatch(t, repo)), ApplyOptions{AllowReviewRequired: true, WriteScope: []string{"docs/"}})
+	if !errors.Is(err, ErrOutOfScope) {
+		t.Fatalf("err %v", err)
+	}
+	if len(rep.OutOfScope) != 2 {
+		t.Fatalf("out of scope %v", rep.OutOfScope)
+	}
+	if git(t, repo, "status", "--porcelain") != "" {
+		t.Fatal("repo changed")
+	}
+}
+
+// The same patch applies when the scope covers both paths (positive control).
+func TestApplyInScope(t *testing.T) {
+	repo := newRepo(t)
+	rep, err := Apply(context.Background(), repo, bytes.NewReader(scopePatch(t, repo)), ApplyOptions{WriteScope: []string{"Makefile", "jail/"}})
+	if err != nil || len(rep.OutOfScope) != 0 {
+		t.Fatalf("err %v report %+v", err, rep)
+	}
+	if !exists(filepath.Join(repo, "jail", "x_test.go")) || !exists(filepath.Join(repo, "Makefile")) {
+		t.Fatal("patch not applied")
+	}
+}
+
+// A rename from inside the scope to outside it is refused: the added path is checked.
+// The inside-to-inside rename is the control.
+func TestApplyRenameAcrossScope(t *testing.T) {
+	repo := newRepo(t)
+	writeFile(t, filepath.Join(repo, "docs", "a.md"), "doc\n")
+	git(t, repo, "add", "-A")
+	git(t, repo, "commit", "-q", "-m", "docs")
+	mv := func(to string) []byte {
+		return makePatch(t, repo, func(d string) { git(t, d, "mv", "docs/a.md", to) })
+	}
+	rep, err := Apply(context.Background(), repo, bytes.NewReader(mv("b.md")), ApplyOptions{WriteScope: []string{"docs/"}})
+	if !errors.Is(err, ErrOutOfScope) || len(rep.OutOfScope) != 1 || rep.OutOfScope[0] != "b.md" {
+		t.Fatalf("err %v report %+v", err, rep)
+	}
+	if git(t, repo, "status", "--porcelain") != "" {
+		t.Fatal("repo changed")
+	}
+	if _, err := Apply(context.Background(), repo, bytes.NewReader(mv("docs/b.md")), ApplyOptions{WriteScope: []string{"docs/"}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A nil scope keeps the old behaviour: the patch applies and nothing is reported out of scope.
+func TestApplyNilScope(t *testing.T) {
+	repo := newRepo(t)
+	rep, err := applyBytes(repo, scopePatch(t, repo), false)
+	if err != nil || rep.OutOfScope != nil || len(rep.Paths) != 2 {
+		t.Fatalf("err %v report %+v", err, rep)
+	}
+}

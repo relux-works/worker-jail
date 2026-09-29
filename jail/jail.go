@@ -54,6 +54,7 @@ var (
 	ErrDirty          = errors.New("target worktree is dirty")
 	ErrGitPath        = errors.New("patch touches a .git path")
 	ErrReviewRequired = errors.New("patch touches review-required paths")
+	ErrOutOfScope     = errors.New("patch touches paths outside the write scope")
 	ErrDoctor         = errors.New("doctor checks failed")
 )
 

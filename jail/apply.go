@@ -12,15 +12,21 @@ import (
 )
 
 // ApplyOptions tunes Apply.
-type ApplyOptions struct{ AllowReviewRequired bool }
+// WriteScope lists repository-relative path prefixes the patch may touch: an entry ending in "/"
+// is a directory, any other entry an exact file. Nil or empty means no restriction.
+type ApplyOptions struct {
+	AllowReviewRequired bool
+	WriteScope          []string
+}
 
 // Flag is a path that needs explicit review.
 type Flag struct{ Path, Reason string }
 
 // ApplyReport lists the paths a patch touches and the ones flagged for review.
 type ApplyReport struct {
-	Paths   []string
-	Flagged []Flag
+	Paths      []string
+	Flagged    []Flag
+	OutOfScope []string
 }
 
 func applyGit(ctx context.Context, repo, index string, stdin []byte, args ...string) (string, error) {
@@ -50,6 +56,9 @@ func Apply(ctx context.Context, repo string, patch io.Reader, o ApplyOptions) (A
 	}
 	if len(data) > ExportCap {
 		return rep, fmt.Errorf("jail: patch exceeds 64 MiB")
+	}
+	if err := validateWriteScope(o.WriteScope); err != nil {
+		return rep, err
 	}
 	if p := gitPathInHeaders(data); p != "" {
 		return rep, fmt.Errorf("%w: %q", ErrGitPath, p)
@@ -91,6 +100,9 @@ func Apply(ctx context.Context, repo string, patch io.Reader, o ApplyOptions) (A
 		if isGitPath(path) {
 			return rep, fmt.Errorf("%w: %q", ErrGitPath, path)
 		}
+		if len(o.WriteScope) > 0 && !inWriteScope(o.WriteScope, path) {
+			rep.OutOfScope = append(rep.OutOfScope, path)
+		}
 		if meta[1] == "120000" {
 			rep.Flagged = append(rep.Flagged, Flag{path, "symlink"})
 		}
@@ -101,6 +113,9 @@ func Apply(ctx context.Context, repo string, patch io.Reader, o ApplyOptions) (A
 			rep.Flagged = append(rep.Flagged, Flag{path, why})
 		}
 	}
+	if len(rep.OutOfScope) > 0 {
+		return rep, ErrOutOfScope
+	}
 	if len(rep.Flagged) > 0 && !o.AllowReviewRequired {
 		return rep, ErrReviewRequired
 	}
@@ -108,6 +123,36 @@ func Apply(ctx context.Context, repo string, patch io.Reader, o ApplyOptions) (A
 		return rep, err
 	}
 	return rep, nil
+}
+
+// validateWriteScope rejects empty, absolute and non-canonical entries and entries naming .git.
+func validateWriteScope(scope []string) error {
+	for _, e := range scope {
+		comps := strings.Split(strings.TrimSuffix(e, "/"), "/")
+		if e == "" || strings.HasPrefix(e, "/") {
+			return fmt.Errorf("jail: invalid write-scope entry %q", e)
+		}
+		for _, c := range comps {
+			if c == "" || c == "." || c == ".." || strings.EqualFold(c, ".git") {
+				return fmt.Errorf("jail: invalid write-scope entry %q", e)
+			}
+		}
+	}
+	return nil
+}
+
+// inWriteScope reports whether path matches a scope entry, case-insensitively.
+func inWriteScope(scope []string, path string) bool {
+	for _, e := range scope {
+		if strings.HasSuffix(e, "/") {
+			if len(path) > len(e) && strings.EqualFold(path[:len(e)], e) {
+				return true
+			}
+		} else if strings.EqualFold(path, e) {
+			return true
+		}
+	}
+	return false
 }
 
 // gitPathInHeaders scans the patch's file headers (from a `diff --git ` line to the first `@@` or

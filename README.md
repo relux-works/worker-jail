@@ -33,4 +33,4 @@ Go for tooling; tests with the go-testing-tools skill, including a red-team suit
 | images | `worker-jail/base:1` (`images/base`), `worker-jail/go:1` (`images/go`) | `make image` (builds into the workers VM) | images in the workers VM |
 | integration tests | the real VM path: provision, run, export, apply, deprovision, timeout, flood, no survivors, offline Go build | `make image && make it` (sets `WJ_IT=1`) | test projects `wjit-*`, purged at the end |
 
-Exit codes of `worker-jail`: `run` exits with the call's status (124 on timeout); usage errors 2; jail errors 3; `apply` refused for review 4.
+Exit codes of `worker-jail`: `run` exits with the call's status (124 on timeout); usage errors 2; jail errors 3; `apply` refused for review 4; `apply --write-scope P1,P2,...` refused for a path outside the write scope 5.
