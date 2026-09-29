@@ -110,12 +110,19 @@ func Apply(ctx context.Context, repo string, patch io.Reader, o ApplyOptions) (A
 	return rep, nil
 }
 
-// gitPathInHeaders scans the patch's file headers for a .git component before git parses it,
-// so such a patch fails as ErrGitPath rather than as whatever git reports. The raw-diff check below stays authoritative.
+// gitPathInHeaders scans the patch's file headers (from a `diff --git ` line to the first `@@` or
+// `GIT binary patch` line) for a .git component before git parses it, so such a patch fails as ErrGitPath.
+// Hunk content is never inspected. The raw-diff check below stays authoritative.
 func gitPathInHeaders(patch []byte) string {
+	inHeader := false
 	for _, line := range strings.Split(string(patch), "\n") {
-		if !strings.HasPrefix(line, "diff --git ") && !strings.HasPrefix(line, "--- ") && !strings.HasPrefix(line, "+++ ") &&
-			!strings.HasPrefix(line, "rename ") && !strings.HasPrefix(line, "copy ") {
+		switch {
+		case strings.HasPrefix(line, "diff --git "):
+			inHeader = true
+		case strings.HasPrefix(line, "@@"), strings.HasPrefix(line, "GIT binary patch"):
+			inHeader = false
+		}
+		if !inHeader {
 			continue
 		}
 		for _, f := range strings.Fields(line) {

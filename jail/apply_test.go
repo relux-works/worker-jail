@@ -203,3 +203,24 @@ func TestReviewRequired(t *testing.T) {
 		}
 	}
 }
+
+// Hunk lines that merely look like .git headers ("-- .git", "++ .git/config") apply fine; header paths with .git still fail.
+func TestApplyGitPathOnlyInHeaders(t *testing.T) {
+	repo := newRepo(t)
+	writeFile(t, filepath.Join(repo, "notes.txt"), "-- .git\nkeep\n")
+	git(t, repo, "add", "-A")
+	git(t, repo, "commit", "-q", "-m", "notes")
+	patch := makePatch(t, repo, func(d string) { writeFile(t, filepath.Join(d, "notes.txt"), "keep\n++ .git/config\n") })
+	if !bytes.Contains(patch, []byte("\n--- .git\n")) || !bytes.Contains(patch, []byte("\n+++ .git/config\n")) {
+		t.Fatalf("fixture lacks the look-alike lines:\n%s", patch)
+	}
+	if _, err := applyBytes(repo, patch, false); err != nil {
+		t.Fatalf("content lines treated as headers: %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(repo, "notes.txt")); string(b) != "keep\n++ .git/config\n" {
+		t.Fatalf("notes.txt %q", b)
+	}
+	if gitPathInHeaders([]byte(gitHookPatch)) == "" {
+		t.Fatal("header .git path missed")
+	}
+}
