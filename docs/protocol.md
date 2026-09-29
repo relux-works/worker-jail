@@ -11,7 +11,7 @@ MUST, MUST NOT and SHOULD are used as in RFC 2119. This protocol supersedes the 
   It will try to read secrets, write outside its workspace, reach the network, persist, escalate, exhaust shared resources,
   and plant code that someone else will run.
 - Everything a worker can read may reach its model provider. Everything it writes is untrusted until an orchestrator has reviewed it.
-- Trusted: the host (macOS), the harness process, the orchestrators, the operator, and the images the operator builds.
+- Trusted: the host (macOS), the harness process, the orchestrators, the operator, and images built from reviewed Dockerfiles.
 - **One boundary**: a fresh Linux container for every tool call, inside a dedicated colima VM that holds nothing of value.
   Everything else in this protocol either keeps that boundary intact or keeps worker output from being executed outside it.
 
@@ -68,7 +68,7 @@ A worker has no other capability:
 The jail MUST provide every guarantee below. The red-team suite (section 12) proves each one with probes and positive controls.
 
 **G1. No host filesystem.**
-- A call can write only to `/work` and `/tmp`. The rootfs and `/cache/*` are read-only. No host path is mounted into any container.
+- A call can write only to `/work` and to its own tmpfs (`/tmp`, and Docker's `/dev/shm`). The rootfs and `/cache/*` are read-only. No host path is mounted into any container: the jail mounts named volumes only, never bind mounts.
 - The workers VM runs with `--mount none`. Its only host share is colima's own read-only image cache (`~/Library/Caches/colima`, public VM images), and no container mounts it.
 - No host file is therefore readable or writable from a call, directly or through symlinks, hardlinks or mounts. That covers `~/.ssh`, `~/.config`, the keychain, other repositories and the live checkout.
 
@@ -122,19 +122,19 @@ Known limits of v1. Each is accepted, and each names the fix that retires it:
 
 The reference implementation is the Go package `github.com/relux-works/worker-jail/jail` plus the CLI `worker-jail`, which mirrors it.
 
-- Callers MUST go through it. They MUST NOT run `docker` against the workers VM themselves; only the red-team suite may.
+- Callers MUST go through it. They MUST NOT run `docker` against the workers VM themselves; only the operator (to build images) and the red-team suite may.
 - It always talks to `unix://$HOME/.colima/workers/docker.sock` and ignores `DOCKER_HOST` and docker contexts.
 - It uses its own empty docker client configuration (`DOCKER_CONFIG`), so the host's docker config never shapes a container. For example, the docker CLI would otherwise inject proxy settings from that config.
 - Project, worker and cache names match `[a-z0-9][a-z0-9-]{0,31}`.
 
 | operation | semantics |
 | --- | --- |
-| `provision P W --repo R [--ref F]` | Runs `doctor` and fails closed. Resolves base = `F^{commit}` in R (F defaults to `HEAD`). Creates the workspace, labelled with base, and clones base from a host `git bundle` inside a call: `/work/src` detached at base, `/work/home` as HOME. Idempotent: an existing workspace is returned unchanged, with Existed=true. A failed provision leaves nothing behind. |
+| `provision P W --repo R [--ref F]` | Runs `doctor` and fails closed. Resolves base = `F^{commit}` in R. F is a branch, a tag or `HEAD` (the default); a raw commit id is refused because `git bundle` needs a ref. Creates the workspace, labelled with base, and clones base from a host `git bundle` inside a call: `/work/src` detached at base, `/work/home` as HOME. Idempotent: an existing workspace is returned unchanged, with Existed=true. A failed provision leaves nothing behind. |
 | `run P W [--timeout D] [--max-output B] -- ARGV` | One call. Waits for a slot, then runs ARGV with the harness's stdin in a fresh container. Returns stdout and stderr (each capped at B, default 4 MiB), the exit status, TimedOut, Truncated, QueueWait and Duration. Timeout defaults to 10 min, maximum 60 min. Output beyond the cap kills the call and sets Truncated. |
 | `export P W [-o FILE]` | Writes the patch from base to the workspace: committed, modified and untracked non-ignored files, binary-safe. It is built in a call that mounts the workspace read-only and is capped at 64 MiB. The patch's sha256 is recorded on the host. |
 | `apply --repo R [--allow-review-required] PATCH` | Host side; see section 8. |
 | `deprovision P W [--force]` | Refuses while a call is running. Unless forced, also refuses if the workspace differs both from base and from the last export. Otherwise removes the workspace. |
-| `seed-cache P NAME < TAR`, `seed-gomod P --repo R [--ref F]` | Extracts a host-built tar into the project's cache NAME, inside a call. Seeding is additive. `seed-gomod` builds that tar with the host's Go from the base revision's `go.mod`, `go.sum` and package list, never from worker files. |
+| `seed-cache P NAME < TAR`, `seed-gomod P --repo R [--ref F]` | Extracts a host-built tar into the project's cache NAME, inside a call. Seeding is additive. `seed-gomod` builds that tar with the host's Go from the base revision's `go.mod`, `go.sum` and package list, never from worker files. Calls of a project that has a `gomod` cache get `GOMODCACHE=/cache/gomod GOPROXY=off GOTOOLCHAIN=local GOFLAGS=-mod=readonly`. |
 | `usage P W` | Bytes used by the workspace. |
 | `ls [P]` | Workspaces (base, creation time), caches, and calls in flight. |
 | `kill [P [W]]` | Kills calls in flight. |
@@ -250,10 +250,10 @@ The jail creates every container with `docker create --rm -i` and runs it with `
 --tmpfs /tmp:rw,nosuid,nodev,size=512m --user 10001:10001 --init
 --cpus 2 --memory 2g --memory-swap 2g --pids-limit 512
 --ulimit nofile=4096:4096 --ulimit fsize=<2 GiB> --ulimit core=0 --log-driver none
---label ai.relux.worker-jail.project=<P> [--label ai.relux.worker-jail.worker=<W>]
--v wj.<P>.<W>:/work[:ro] [-v wj-cache.<P>.<name>:/cache/<name>:ro ...] -w /work/src
+--label ai.relux.worker-jail=1 --label ai.relux.worker-jail.kind=call --label ai.relux.worker-jail.project=<P> [--label ai.relux.worker-jail.worker=<W>]
+--mount type=volume,src=wj.<P>.<W>,dst=/work[,readonly] [--mount type=volume,src=wj-cache.<P>.<name>,dst=/cache/<name>,readonly ...] -w /work/src
 -e HOME=/work/home -e TMPDIR=/tmp
 <image> timeout -s KILL <timeout + 5 s> <argv...>
 ```
 
-The limits above are the defaults; a caller may lower them, and raise them only up to the protocol maximums. The host kills a call at its timeout with `docker kill`. The in-container `timeout` is the backstop for when the host process has died.
+Only named volumes are mounted; there is never a bind mount, `--privileged`, `--cap-add`, `--device`, or a host namespace. The limits above are the defaults; a caller may lower them, and raise them only up to the protocol maximums. The host kills a call at its timeout with `docker kill`. The in-container `timeout` is the backstop for when the host process has died.
