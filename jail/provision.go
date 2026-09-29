@@ -98,19 +98,41 @@ func (j *Jail) Provision(ctx context.Context, s ProvisionSpec) (Workspace, error
 	if s.Repo == "" {
 		return ws, errors.New("jail: provision needs a repo")
 	}
-	base, fullref, err := resolveBase(ctx, s.Repo, s.RefName)
-	if err != nil {
-		return ws, err
+	if s.FromWorktree && s.RefName != "" {
+		return ws, errors.New("jail: FromWorktree and RefName are mutually exclusive")
 	}
-	if fullref == "" {
-		return ws, fmt.Errorf("jail: ref %q resolves to a raw sha; RefName must be a branch, a tag or HEAD", s.RefName)
+	var base string
+	var bundle *exec.Cmd
+	var extra []string
+	if s.FromWorktree {
+		snap, err := snapshotWorktree(ctx, s.Repo)
+		if err != nil {
+			return ws, err
+		}
+		defer snap.Cleanup()
+		base = snap.Snap
+		bundle = exec.CommandContext(ctx, "git", "bundle", "create", "-", "refs/heads/snapshot")
+		bundle.Env = append(hostEnv(), "GIT_DIR="+snap.seed.gitDir)
+		extra = []string{LabelSource + "=worktree", LabelHead + "=" + snap.Head}
+	} else {
+		b, fullref, err := resolveBase(ctx, s.Repo, s.RefName)
+		if err != nil {
+			return ws, err
+		}
+		if fullref == "" {
+			return ws, fmt.Errorf("jail: ref %q resolves to a raw sha; RefName must be a branch, a tag or HEAD", s.RefName)
+		}
+		base = b
+		bundle = exec.CommandContext(ctx, "git", "-C", s.Repo, "bundle", "create", "-", fullref)
+		bundle.Env = hostEnv()
 	}
 	created := time.Now().UTC().Truncate(time.Second)
-	if err := j.volumeCreate(ctx, ws.Volume, LabelRoot+"=1", LabelKind+"="+KindWorkspace, LabelProject+"="+s.Project,
-		LabelWorker+"="+s.Worker, LabelBase+"="+base, LabelCreated+"="+created.Format(time.RFC3339)); err != nil {
+	vlabels := append([]string{LabelRoot + "=1", LabelKind + "=" + KindWorkspace, LabelProject + "=" + s.Project,
+		LabelWorker + "=" + s.Worker, LabelBase + "=" + base, LabelCreated + "=" + created.Format(time.RFC3339)}, extra...)
+	if err := j.volumeCreate(ctx, ws.Volume, vlabels...); err != nil {
 		return ws, err
 	}
-	if err := j.cloneInto(ctx, s, base, fullref); err != nil {
+	if err := j.cloneInto(ctx, s, base, bundle); err != nil {
 		rmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
 		j.dockerOut(rmCtx, nil, "volume", "rm", "-f", ws.Volume)
@@ -120,12 +142,10 @@ func (j *Jail) Provision(ctx context.Context, s ProvisionSpec) (Workspace, error
 	return ws, nil
 }
 
-func (j *Jail) cloneInto(ctx context.Context, s ProvisionSpec, base, fullref string) error {
-	bctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	bundle := exec.CommandContext(bctx, "git", "-C", s.Repo, "bundle", "create", "-", fullref)
+// cloneInto streams bundle's stdout (a not yet started `git bundle create -`) into the provision script.
+func (j *Jail) cloneInto(ctx context.Context, s ProvisionSpec, base string, bundle *exec.Cmd) error {
 	var berr bytes.Buffer
-	bundle.Stderr, bundle.Env = &berr, hostEnv()
+	bundle.Stderr = &berr
 	pipe, err := bundle.StdoutPipe()
 	if err != nil {
 		return err

@@ -17,6 +17,9 @@ import (
 type ApplyOptions struct {
 	AllowReviewRequired bool
 	WriteScope          []string
+	// AllowDirty permits a dirty target: the patch is checked against its current working tree and
+	// applied to the working tree only, never to its index.
+	AllowDirty bool
 }
 
 // Flag is a path that needs explicit review.
@@ -67,6 +70,9 @@ func Apply(ctx context.Context, repo string, patch io.Reader, o ApplyOptions) (A
 	if err != nil || strings.TrimSpace(out) != "true" {
 		return rep, fmt.Errorf("jail: %s is not a git worktree: %v", repo, err)
 	}
+	if o.AllowDirty {
+		return applyDirty(ctx, repo, data, o)
+	}
 	out, err = applyGit(ctx, repo, "", nil, "status", "--porcelain=v1", "-z", "--untracked-files=all")
 	if err != nil {
 		return rep, err
@@ -90,6 +96,48 @@ func Apply(ctx context.Context, repo string, patch io.Reader, o ApplyOptions) (A
 	if err != nil {
 		return rep, err
 	}
+	if rep, err = checkRaw(raw, o); err != nil {
+		return rep, err
+	}
+	if _, err := applyGit(ctx, repo, "", data, "apply", "--index", "--whitespace=nowarn", "-"); err != nil {
+		return rep, err
+	}
+	return rep, nil
+}
+
+// applyDirty checks the patch against a temporary index of repo's current working tree, then applies it
+// to the working tree only.
+func applyDirty(ctx context.Context, repo string, data []byte, o ApplyOptions) (ApplyReport, error) {
+	var rep ApplyReport
+	s, err := newSeed(ctx, repo)
+	if err != nil {
+		return rep, err
+	}
+	defer s.cleanup()
+	pre, err := s.git(ctx, nil, nil, "write-tree")
+	if err != nil {
+		return rep, err
+	}
+	if _, err := s.git(ctx, data, nil, "apply", "--cached", "--whitespace=nowarn", "-"); err != nil {
+		return rep, fmt.Errorf("jail: patch does not apply: %w", err)
+	}
+	raw, err := s.git(ctx, nil, nil, "diff", "--cached", "--raw", "-z", "--no-renames", "--no-ext-diff", strings.TrimSpace(pre))
+	if err != nil {
+		return rep, err
+	}
+	if rep, err = checkRaw(raw, o); err != nil {
+		return rep, err
+	}
+	if _, err := applyGit(ctx, repo, "", data, "apply", "--whitespace=nowarn", "-"); err != nil {
+		return rep, err
+	}
+	return rep, nil
+}
+
+// checkRaw parses `git diff --raw -z` output and runs the path gates: .git and write scope (hard), then
+// symlinks, gitlinks and review-required paths unless allowed.
+func checkRaw(raw string, o ApplyOptions) (ApplyReport, error) {
+	var rep ApplyReport
 	f := strings.Split(raw, "\x00")
 	for i := 0; i+1 < len(f); i += 2 {
 		meta, path := strings.Fields(strings.TrimPrefix(f[i], ":")), f[i+1]
@@ -118,9 +166,6 @@ func Apply(ctx context.Context, repo string, patch io.Reader, o ApplyOptions) (A
 	}
 	if len(rep.Flagged) > 0 && !o.AllowReviewRequired {
 		return rep, ErrReviewRequired
-	}
-	if _, err := applyGit(ctx, repo, "", data, "apply", "--index", "--whitespace=nowarn", "-"); err != nil {
-		return rep, err
 	}
 	return rep, nil
 }

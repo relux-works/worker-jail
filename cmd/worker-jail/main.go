@@ -23,13 +23,13 @@ const usage = `usage: worker-jail [--image IMG] [--state-dir DIR] [--slots N] [-
 
 commands:
   doctor
-  provision   --project P --worker W --repo PATH [--ref REF]
+  provision   --project P --worker W --repo PATH [--ref REF | --from-worktree]
   run         --project P --worker W [--timeout 10m] [--max-output 4194304] -- ARGV...
   export      --project P --worker W [-o FILE]
-  apply       --repo PATH [--write-scope P1,P2,...] [--allow-review-required] PATCH
+  apply       --repo PATH [--write-scope P1,P2,...] [--allow-dirty] [--allow-review-required] PATCH
   deprovision --project P --worker W [--force]
   seed-cache  --project P --name NAME   (tar on stdin)
-  seed-gomod  --project P --repo PATH [--ref REF]
+  seed-gomod  --project P --repo PATH [--ref REF | --from-worktree]
   usage       --project P --worker W
   ls          [--project P]
   kill        [--project P] [--worker W]
@@ -151,6 +151,11 @@ func (f *flags) parse(args []string, need ...string) error {
 	return nil
 }
 
+func (f *flags) isSet(name string) (set bool) {
+	f.Visit(func(fl *flag.Flag) { set = set || fl.Name == name })
+	return set
+}
+
 func (f *flags) ref() jail.Ref { return jail.Ref{Project: *f.project, Worker: *f.worker} }
 
 func (c *cli) doctor(ctx context.Context, args []string) (int, error) {
@@ -172,14 +177,26 @@ func (c *cli) doctor(ctx context.Context, args []string) (int, error) {
 func (c *cli) provision(ctx context.Context, args []string) (int, error) {
 	f := newFlags("provision", c.stderr).withRef()
 	repo, ref := f.String("repo", "", "repository path"), f.String("ref", "HEAD", "branch, tag or HEAD")
+	wt := f.Bool("from-worktree", false, "snapshot the repository's working tree as base")
 	if err := f.parse(args, "project", "worker", "repo"); err != nil {
 		return 0, err
 	}
-	ws, err := c.j.Provision(ctx, jail.ProvisionSpec{Ref: f.ref(), Repo: *repo, RefName: *ref})
+	spec := jail.ProvisionSpec{Ref: f.ref(), Repo: *repo, RefName: *ref, FromWorktree: *wt}
+	if *wt {
+		if f.isSet("ref") {
+			return 0, usageError{"--from-worktree and --ref are mutually exclusive"}
+		}
+		spec.RefName = ""
+	}
+	ws, err := c.j.Provision(ctx, spec)
 	if err != nil {
 		return 0, err
 	}
-	fmt.Fprintf(c.stdout, "%s base=%s existed=%v\n", ws.Volume, ws.Base, ws.Existed)
+	if *wt {
+		fmt.Fprintf(c.stdout, "%s base=%s existed=%v source=worktree\n", ws.Volume, ws.Base, ws.Existed)
+	} else {
+		fmt.Fprintf(c.stdout, "%s base=%s existed=%v\n", ws.Volume, ws.Base, ws.Existed)
+	}
 	return 0, nil
 }
 
@@ -249,8 +266,9 @@ func (c *cli) export(ctx context.Context, args []string) (int, error) {
 
 func cmdApply(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	f := newFlags("apply", stderr)
-	repo := f.String("repo", "", "clean target worktree")
+	repo := f.String("repo", "", "target worktree (clean unless --allow-dirty)")
 	allow := f.Bool("allow-review-required", false, "apply flagged paths after reading every flagged hunk")
+	dirty := f.Bool("allow-dirty", false, "apply to a dirty worktree's working tree only (never its index)")
 	var scope []string
 	f.Func("write-scope", "comma-separated path prefixes the patch may touch (dir/ or file); repeatable", func(v string) error {
 		scope = append(scope, strings.Split(v, ",")...)
@@ -267,7 +285,7 @@ func cmdApply(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		return err
 	}
 	defer p.Close()
-	rep, err := jail.Apply(ctx, *repo, p, jail.ApplyOptions{AllowReviewRequired: *allow, WriteScope: scope})
+	rep, err := jail.Apply(ctx, *repo, p, jail.ApplyOptions{AllowReviewRequired: *allow, WriteScope: scope, AllowDirty: *dirty})
 	for _, pth := range rep.OutOfScope {
 		fmt.Fprintf(stderr, "out of scope: %s\n", pth)
 	}
@@ -307,8 +325,15 @@ func (c *cli) seedGoMod(ctx context.Context, args []string) (int, error) {
 	f := newFlags("seed-gomod", c.stderr)
 	project := f.String("project", "", "project")
 	repo, ref := f.String("repo", "", "repository path"), f.String("ref", "HEAD", "revision")
+	wt := f.Bool("from-worktree", false, "use a snapshot of the repository's working tree")
 	if err := f.parse(args, "project", "repo"); err != nil {
 		return 0, err
+	}
+	if *wt {
+		if f.isSet("ref") {
+			return 0, usageError{"--from-worktree and --ref are mutually exclusive"}
+		}
+		return 0, c.j.SeedGoModWorktree(ctx, *project, *repo)
 	}
 	return 0, c.j.SeedGoMod(ctx, *project, *repo, *ref)
 }

@@ -934,6 +934,57 @@ git config core.hooksPath .git/hooks && echo planted > planted.txt`, marker))
 			row.Layers = []string{"git's own path validation (Apply relies on it)"}
 			row.Note = "control records git's own layer instead of succeeding (per the brief)"
 		}},
+		{id: "G8-snapshot-isolation", tries: "snapshot of a dirty repo (modified, staged, untracked, ignored files)", run: func(e *rtEnv, row *rtRow) {
+			repo := dirtyRepo(e.t)
+			before := repoState(e.t, repo)
+			snap, err := snapshotWorktree(e.ctx, repo)
+			if err == nil {
+				snap.Cleanup()
+			}
+			row.Jailed = rtOutcome{err == nil && repoState(e.t, repo) == before,
+				fmt.Sprintf("snapshot err=%v; index, refs, count-objects and status identical=%v", err, repoState(e.t, repo) == before)}
+			naive := dirtyRepo(e.t)
+			nbefore := repoState(e.t, naive)
+			git(e.t, naive, "add", "-A")
+			row.Control = rtOutcome{repoState(e.t, naive) != nbefore, "naive git add -A in the real repo changed its index/objects"}
+			row.Layers = []string{"temporary seed repo with alternates and its own index"}
+		}},
+		{id: "G8-dirty-conflict", tries: "worker edit conflicting with an orchestrator edit made after the snapshot", run: func(e *rtEnv, row *rtRow) {
+			repo := dirtyRepo(e.t)
+			r := Ref{e.p, "w-dc"}
+			if _, err := e.j.Provision(e.ctx, ProvisionSpec{Ref: r, Repo: repo, FromWorktree: true}); err != nil {
+				e.t.Fatal(err)
+			}
+			e.jrun(r, time.Minute, "echo worker > README.md && echo worker > worker.txt")
+			patch := e.export(r)
+			writeFile(e.t, filepath.Join(repo, "README.md"), "orchestrator\n")
+			before := worktreeState(e.t, repo)
+			_, err := Apply(e.ctx, repo, bytes.NewReader(patch), ApplyOptions{AllowDirty: true})
+			row.Jailed = rtOutcome{err != nil && worktreeState(e.t, repo) == before && !fileExists(filepath.Join(repo, "worker.txt")),
+				fmt.Sprintf("err=%v; tree and index unchanged=%v", ev(fmt.Sprint(err)), worktreeState(e.t, repo) == before)}
+			writeFile(e.t, filepath.Join(repo, "README.md"), "modified\n")
+			writeFile(e.t, filepath.Join(repo, "staged.txt"), "orchestrator\n")
+			idx := readFile(e.t, filepath.Join(repo, ".git", "index"))
+			_, err = Apply(e.ctx, repo, bytes.NewReader(patch), ApplyOptions{AllowDirty: true})
+			row.Control = rtOutcome{err == nil && fileExists(filepath.Join(repo, "worker.txt")) && readFile(e.t, filepath.Join(repo, ".git", "index")) == idx,
+				fmt.Sprintf("non-conflicting dirty edit: err=%v; index unchanged", err)}
+			row.Layers = []string{"dry run in a temporary index of the current worktree", "worktree-only git apply"}
+		}},
+		{id: "G7-snapshot-secret", tries: "untracked .env in the snapshotted worktree", run: func(e *rtEnv, row *rtRow) {
+			repo := dirtyRepo(e.t)
+			writeFile(e.t, filepath.Join(repo, ".env"), "WJRT_TOKEN=WJRT-CANARY-G7-snapshot\n")
+			_, err := snapshotWorktree(e.ctx, repo)
+			row.Jailed = rtOutcome{errors.Is(err, ErrSecretLike), fmt.Sprintf("err=%v", err)}
+			writeFile(e.t, filepath.Join(repo, ".gitignore"), "ignored.txt\n.env\n")
+			snap, err := snapshotWorktree(e.ctx, repo)
+			ok := err == nil && !snapFiles(e.t, snap)[".env"]
+			if err == nil {
+				snap.Cleanup()
+			}
+			row.Control = rtOutcome{ok, fmt.Sprintf("gitignored: err=%v; .env absent=%v", err, ok)}
+			row.Layers = []string{"secret-like untracked name check before hashing"}
+			row.Note = "control shows the snapshot proceeds once the file is ignored"
+		}},
 	}
 }
 

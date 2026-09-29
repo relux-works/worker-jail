@@ -221,3 +221,39 @@ func main() { var g errgroup.Group; g.Go(func() error { return nil }); _ = g.Wai
 		t.Fatalf("control: unseeded build succeeded offline: %s", res.Stdout)
 	}
 }
+
+// Story worktree flow: a dirty worktree is provisioned as a snapshot, the export holds only the worker's
+// delta, and a dirty-target apply lands it without touching the orchestrator's dirty state or index.
+func TestIntegrationWorktreeFlow(t *testing.T) {
+	j := itJail(t, "")
+	ctx := context.Background()
+	repo := dirtyRepo(t)
+	r := Ref{itProject(t, j), "w1"}
+	ws, err := j.Provision(ctx, ProvisionSpec{Ref: r, Repo: repo, FromWorktree: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := itRun(t, j, r, "", "sh", "-c", "cat README.md staged.txt untracked.txt; test ! -e ignored.txt && echo no-ignored")
+	if res.Exit != 0 || string(res.Stdout) != "modified\nstaged\nuntracked\nno-ignored\n" {
+		t.Fatalf("in-jail tree %q (exit %d) %s", res.Stdout, res.Exit, res.Stderr)
+	}
+	itRun(t, j, r, "", "sh", "-c", "echo worker >> untracked.txt")
+	var patch bytes.Buffer
+	if _, err := j.Export(ctx, r, &patch); err != nil {
+		t.Fatal(err)
+	}
+	if paths := patchPaths(patch.Bytes()); len(paths) != 1 || paths[0] != "untracked.txt" {
+		t.Fatalf("patch paths %v: %s", paths, patch.String())
+	}
+	idx := readFile(t, filepath.Join(repo, ".git", "index"))
+	if _, err := Apply(ctx, repo, bytes.NewReader(patch.Bytes()), ApplyOptions{AllowDirty: true}); err != nil {
+		t.Fatal(err)
+	}
+	if readFile(t, filepath.Join(repo, "untracked.txt")) != "untracked\nworker\n" || readFile(t, filepath.Join(repo, "README.md")) != "modified\n" ||
+		readFile(t, filepath.Join(repo, "staged.txt")) != "staged\n" || readFile(t, filepath.Join(repo, ".git", "index")) != idx {
+		t.Fatalf("host state after apply wrong (base %s)", ws.Base)
+	}
+	if err := j.Deprovision(ctx, r, true); err != nil {
+		t.Fatal(err)
+	}
+}

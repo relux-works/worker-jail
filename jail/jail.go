@@ -27,6 +27,8 @@ const (
 	LabelCache   = LabelRoot + ".cache"
 	LabelBase    = LabelRoot + ".base"
 	LabelCreated = LabelRoot + ".created"
+	LabelSource  = LabelRoot + ".source"
+	LabelHead    = LabelRoot + ".head"
 
 	KindWorkspace = "workspace"
 	KindCache     = "cache"
@@ -55,6 +57,7 @@ var (
 	ErrGitPath        = errors.New("patch touches a .git path")
 	ErrReviewRequired = errors.New("patch touches review-required paths")
 	ErrOutOfScope     = errors.New("patch touches paths outside the write scope")
+	ErrSecretLike     = errors.New("untracked files with secret-like names")
 	ErrDoctor         = errors.New("doctor checks failed")
 )
 
@@ -208,6 +211,8 @@ type Workspace struct {
 type ProvisionSpec struct {
 	Ref
 	Repo, RefName string // RefName default "HEAD"
+	// FromWorktree provisions from a snapshot of Repo's working tree; exclusive with RefName.
+	FromWorktree bool
 }
 
 // RunSpec is the input of Run.

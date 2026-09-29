@@ -142,3 +142,36 @@ func TestProvisionRefusesBadRefs(t *testing.T) {
 		t.Fatalf("invalid worker: %v", err)
 	}
 }
+
+// FromWorktree labels the workspace with the snapshot base, source=worktree and HEAD, and clones the
+// snapshot bundle; together with RefName it is refused before any volume exists.
+func TestProvisionFromWorktree(t *testing.T) {
+	repo := dirtyRepo(t)
+	head := git(t, repo, "rev-parse", "HEAD")
+	fd := newFakeDocker()
+	fd.onStart = provisionStart(t, 1, 0)
+	j := newTestJail(t, fd)
+	ws, err := j.Provision(context.Background(), ProvisionSpec{Ref: Ref{"p1", "w1"}, Repo: repo, FromWorktree: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := fd.volumes["wj.p1.w1"]
+	if ws.Base == head || l[LabelBase] != ws.Base || l[LabelSource] != "worktree" || l[LabelHead] != head {
+		t.Fatalf("ws %+v labels %v", ws, l)
+	}
+	if argv := fd.starts[0].argv(); argv[4] != ws.Base {
+		t.Fatalf("clone argv %q", argv)
+	}
+	// Control: a ref provision carries no source/head labels.
+	if _, err := j.Provision(context.Background(), ProvisionSpec{Ref: Ref{"p1", "w2"}, Repo: repo}); err != nil {
+		t.Fatal(err)
+	}
+	if l := fd.volumes["wj.p1.w2"]; l[LabelSource] != "" || l[LabelHead] != "" || l[LabelBase] != head {
+		t.Fatalf("ref labels %v", l)
+	}
+	fd = newFakeDocker()
+	_, err = newTestJail(t, fd).Provision(context.Background(), ProvisionSpec{Ref: Ref{"p1", "w1"}, Repo: repo, RefName: "main", FromWorktree: true})
+	if err == nil || fd.count("volume create") != 0 {
+		t.Fatalf("FromWorktree+RefName: err %v, creates %d", err, fd.count("volume create"))
+	}
+}

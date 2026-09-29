@@ -59,13 +59,35 @@ func (j *Jail) SeedGoMod(ctx context.Context, project, repo, refName string) err
 	if err != nil {
 		return err
 	}
+	return j.seedGoModFrom(ctx, project, func(src string) error {
+		return extractArchive(ctx, hostEnv(), base, src, "-C", repo)
+	})
+}
+
+// SeedGoModWorktree is SeedGoMod with a snapshot of repo's working tree as the source tree.
+func (j *Jail) SeedGoModWorktree(ctx context.Context, project, repo string) error {
+	if err := ValidName(project); err != nil {
+		return err
+	}
+	snap, err := snapshotWorktree(ctx, repo)
+	if err != nil {
+		return err
+	}
+	defer snap.Cleanup()
+	return j.seedGoModFrom(ctx, project, func(src string) error {
+		return extractArchive(ctx, append(hostEnv(), "GIT_DIR="+snap.seed.gitDir), snap.Snap, src)
+	})
+}
+
+// seedGoModFrom downloads the module graph of the tree that extract writes into src and seeds cache "gomod".
+func (j *Jail) seedGoModFrom(ctx context.Context, project string, extract func(src string) error) error {
 	tmp, err := os.MkdirTemp("", "wj-gomod-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tmp)
 	src, mod := filepath.Join(tmp, "src"), filepath.Join(tmp, "mod")
-	if err := extractArchive(ctx, repo, base, src); err != nil {
+	if err := extract(src); err != nil {
 		return err
 	}
 	hostMod, err := goEnv(ctx, "GOMODCACHE")
@@ -108,12 +130,13 @@ func goEnv(ctx context.Context, name string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// extractArchive extracts `git archive` of rev into dst: regular files and directories; links are skipped.
-func extractArchive(ctx context.Context, repo, rev, dst string) error {
-	cmd := exec.CommandContext(ctx, "git", "-C", repo, "archive", "--format=tar", rev)
+// extractArchive extracts `git [gitArgs] archive` of rev, run with env, into dst: regular files and
+// directories; links are skipped.
+func extractArchive(ctx context.Context, env []string, rev, dst string, gitArgs ...string) error {
+	cmd := exec.CommandContext(ctx, "git", append(gitArgs, "archive", "--format=tar", rev)...)
 	var errb limitBuffer
 	errb.buf, errb.max = new(bytes.Buffer), 1<<20
-	cmd.Stderr, cmd.Env = &errb, hostEnv()
+	cmd.Stderr, cmd.Env = &errb, env
 	pipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
