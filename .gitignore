@@ -1,0 +1,4 @@
+.temp/
+.task-board/
+task-board.config.json
+bin/
