@@ -40,8 +40,7 @@ func (c *cappedWriter) Write(p []byte) (int, error) {
 var killWait = 30 * time.Second
 
 // call runs one container: slots, create, start -a -i, caps, kill. stdout goes to out (capped at maxOut).
-func (j *Jail) call(ctx context.Context, s callSpec, stdin io.Reader, out io.Writer, maxOut int) (Result, []byte, error) {
-	var res Result
+func (j *Jail) call(ctx context.Context, s callSpec, stdin io.Reader, out io.Writer, maxOut int) (res Result, _ []byte, err error) {
 	s.Name, s.Image, s.Limits = newCallName(), j.image, j.limits
 	args, err := createArgs(s)
 	if err != nil {

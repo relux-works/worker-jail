@@ -227,3 +227,15 @@ func TestRunKillWaitBounded(t *testing.T) {
 		t.Fatalf("control: %+v %v", res, err)
 	}
 }
+
+// Result.Duration reports the call's run time (regression: it was always 0); a 50 ms start yields ≥ 50 ms.
+func TestRunReportsDuration(t *testing.T) {
+	fd := newFakeDocker()
+	addWorkspace(fd, "p1", "w1", strings.Repeat("a", 40))
+	fd.onStart = func(c *fakeCall) int { time.Sleep(50 * time.Millisecond); return 0 }
+	j := newTestJail(t, fd)
+	res, err := j.Run(context.Background(), Ref{"p1", "w1"}, RunSpec{Argv: []string{"true"}})
+	if err != nil || res.Duration < 50*time.Millisecond {
+		t.Fatalf("duration %v err %v", res.Duration, err)
+	}
+}

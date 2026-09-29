@@ -1,6 +1,6 @@
 WORKERS_DOCKER := DOCKER_HOST=unix://$(HOME)/.colima/workers/docker.sock
 
-.PHONY: build test vet cover image it
+.PHONY: build test vet cover image image-redteam it redteam
 
 build:
 	go build -o bin/worker-jail ./cmd/worker-jail
@@ -20,3 +20,10 @@ image:
 
 it:
 	WJ_IT=1 go test ./jail -run Integration -count=1 -v
+
+# Test-only adversarial image; never use it for real workers.
+image-redteam:
+	$(WORKERS_DOCKER) docker build -t worker-jail/redteam:1 images/redteam
+
+redteam:
+	WJ_REDTEAM=1 go test ./jail -run RedTeam -count=1 -v -timeout 30m
