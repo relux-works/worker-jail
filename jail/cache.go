@@ -108,7 +108,7 @@ func goEnv(ctx context.Context, name string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// extractArchive extracts `git archive` of rev into dst, accepting only regular files and directories.
+// extractArchive extracts `git archive` of rev into dst: regular files and directories; links are skipped.
 func extractArchive(ctx context.Context, repo, rev, dst string) error {
 	cmd := exec.CommandContext(ctx, "git", "-C", repo, "archive", "--format=tar", rev)
 	var errb limitBuffer
@@ -176,6 +176,8 @@ func untar(r io.Reader, dst string) error {
 			if err := errors.Join(cerr, f.Close()); err != nil {
 				return err
 			}
+		case tar.TypeSymlink, tar.TypeLink:
+			// Links are skipped: nothing is created for them.
 		default:
 			return fmt.Errorf("jail: archive: unsupported entry %q (type %c)", name, h.Typeflag)
 		}

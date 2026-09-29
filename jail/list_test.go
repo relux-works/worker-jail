@@ -155,7 +155,7 @@ func TestSeedGoMod(t *testing.T) {
 	}
 }
 
-// untar accepts regular files and dirs and rejects traversal, absolute paths and links.
+// untar extracts regular files and dirs, skips links without creating them, and rejects traversal and absolute paths.
 func TestUntar(t *testing.T) {
 	mk := func(hs ...*tar.Header) []byte {
 		var b bytes.Buffer
@@ -175,15 +175,24 @@ func TestUntar(t *testing.T) {
 		t.Fatalf("control: %v", err)
 	}
 	for name, h := range map[string]*tar.Header{
-		"dotdot":   {Name: "../evil", Typeflag: tar.TypeReg, Size: 1},
-		"abs":      {Name: "/etc/evil", Typeflag: tar.TypeReg, Size: 1},
-		"symlink":  {Name: "l", Typeflag: tar.TypeSymlink, Linkname: "/etc"},
-		"hardlink": {Name: "h", Typeflag: tar.TypeLink, Linkname: "d/f"},
+		"dotdot": {Name: "../evil", Typeflag: tar.TypeReg, Size: 1},
+		"abs":    {Name: "/etc/evil", Typeflag: tar.TypeReg, Size: 1},
+		"fifo":   {Name: "p", Typeflag: tar.TypeFifo},
 	} {
 		d := t.TempDir()
 		if err := untar(bytes.NewReader(mk(h)), d); err == nil {
 			t.Errorf("%s accepted", name)
 		}
+	}
+	links := mk(&tar.Header{Name: "s", Typeflag: tar.TypeSymlink, Linkname: "/etc"},
+		&tar.Header{Name: "h", Typeflag: tar.TypeLink, Linkname: "g"},
+		&tar.Header{Name: "g", Typeflag: tar.TypeReg, Mode: 0o644, Size: 2})
+	d3 := t.TempDir()
+	if err := untar(bytes.NewReader(links), d3); err != nil {
+		t.Fatalf("links: %v", err)
+	}
+	if !exists(filepath.Join(d3, "g")) || exists(filepath.Join(d3, "s")) || exists(filepath.Join(d3, "h")) {
+		t.Fatal("links not skipped or regular file missing")
 	}
 	// writeTar round-trips through untar.
 	var b bytes.Buffer
