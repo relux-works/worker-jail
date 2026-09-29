@@ -26,7 +26,7 @@ commands:
   provision   --project P --worker W --repo PATH [--ref REF]
   run         --project P --worker W [--timeout 10m] [--max-output 4194304] -- ARGV...
   export      --project P --worker W [-o FILE]
-  apply       --repo PATH [--allow-review-required] PATCH
+  apply       --repo PATH [--write-scope P1,P2,...] [--allow-review-required] PATCH
   deprovision --project P --worker W [--force]
   seed-cache  --project P --name NAME   (tar on stdin)
   seed-gomod  --project P --repo PATH [--ref REF]
@@ -104,6 +104,9 @@ func report(stderr io.Writer, err error) int {
 		return 2
 	case errors.Is(err, flag.ErrHelp):
 		return 2
+	case errors.Is(err, jail.ErrOutOfScope):
+		fmt.Fprintf(stderr, "worker-jail: %v\n", err)
+		return 5
 	case errors.Is(err, jail.ErrReviewRequired):
 		fmt.Fprintf(stderr, "worker-jail: %v\n", err)
 		return 4
@@ -248,6 +251,11 @@ func cmdApply(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	f := newFlags("apply", stderr)
 	repo := f.String("repo", "", "clean target worktree")
 	allow := f.Bool("allow-review-required", false, "apply flagged paths after reading every flagged hunk")
+	var scope []string
+	f.Func("write-scope", "comma-separated path prefixes the patch may touch (dir/ or file); repeatable", func(v string) error {
+		scope = append(scope, strings.Split(v, ",")...)
+		return nil
+	})
 	if err := f.parse(args, "repo"); err != nil {
 		return err
 	}
@@ -259,7 +267,10 @@ func cmdApply(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		return err
 	}
 	defer p.Close()
-	rep, err := jail.Apply(ctx, *repo, p, jail.ApplyOptions{AllowReviewRequired: *allow})
+	rep, err := jail.Apply(ctx, *repo, p, jail.ApplyOptions{AllowReviewRequired: *allow, WriteScope: scope})
+	for _, pth := range rep.OutOfScope {
+		fmt.Fprintf(stderr, "out of scope: %s\n", pth)
+	}
 	for _, fl := range rep.Flagged {
 		fmt.Fprintf(stderr, "flagged: %s (%s)\n", fl.Path, fl.Reason)
 	}
