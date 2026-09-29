@@ -23,7 +23,7 @@ func hardening(worker string) []string {
 		a = append(a, "--label", "ai.relux.worker-jail.worker="+worker)
 	}
 	return append(a, "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only",
-		"--tmpfs", "/tmp:rw,nosuid,nodev,size=536870912", "--user", "10001:10001", "--cpus", "2",
+		"--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=536870912", "--user", "10001:10001", "--cpus", "2",
 		"--memory", "2147483648", "--memory-swap", "2147483648", "--pids-limit", "512",
 		"--ulimit", "nofile=4096:4096", "--ulimit", "fsize=2147483648:2147483648", "--ulimit", "core=0:0",
 		"--log-driver", "none")
@@ -204,6 +204,20 @@ func TestValidName(t *testing.T) {
 	for _, n := range []string{"", "A", "-x", "a..b", "a.b", "a/b", "../x", "a_b", "a b", "é", strings.Repeat("a", 33)} {
 		if err := ValidName(n); !errors.Is(err, ErrInvalidName) {
 			t.Errorf("%q accepted", n)
+		}
+	}
+}
+
+// /tmp is mounted exec (go test links binaries there) but never suid or dev, in every shape.
+func TestCreateArgsTmpfsExec(t *testing.T) {
+	for _, sh := range []shape{shapeCall, shapeReadOnly} {
+		a, err := createArgs(baseSpec(sh))
+		if err != nil {
+			t.Fatal(err)
+		}
+		v := flagValue(a, "--tmpfs")
+		if !strings.Contains(v, ",exec,") || strings.Contains(v, "noexec") || !strings.Contains(v, "nosuid") || !strings.Contains(v, "nodev") {
+			t.Fatalf("tmpfs %q", v)
 		}
 	}
 }

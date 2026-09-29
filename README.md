@@ -32,4 +32,3 @@ Go for tooling; tests with the go-testing-tools skill, including a red-team suit
 | integration tests | the real VM path: provision, run, export, apply, deprovision, timeout, flood, no survivors, offline Go build | `make image && make it` (sets `WJ_IT=1`) | test projects `wjit-*`, purged at the end |
 
 Exit codes of `worker-jail`: `run` exits with the call's status (124 on timeout); usage errors 2; jail errors 3; `apply` refused for review 4.
-Note: Docker mounts the `/tmp` tmpfs `noexec`. Tools that execute from the temp dir (for example `go test`) need a temp dir under `/work`, such as `GOTMPDIR=$HOME/gotmp`.

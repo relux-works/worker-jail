@@ -97,7 +97,7 @@ func createArgs(s callSpec) ([]string, error) {
 	}
 	a = append(a,
 		"--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only",
-		"--tmpfs", "/tmp:rw,nosuid,nodev,size="+i64(l.Tmp),
+		"--tmpfs", "/tmp:rw,exec,nosuid,nodev,size="+i64(l.Tmp),
 		"--user", "10001:10001",
 		"--cpus", strconv.FormatFloat(l.CPUs, 'f', -1, 64),
 		"--memory", i64(l.Memory), "--memory-swap", i64(l.Memory),

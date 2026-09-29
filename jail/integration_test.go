@@ -213,8 +213,7 @@ func main() { var g errgroup.Group; g.Go(func() error { return nil }); _ = g.Wai
 	if err := j.SeedGoMod(ctx, seeded.Project, repo, "HEAD"); err != nil {
 		t.Fatal(err)
 	}
-	// Docker mounts the /tmp tmpfs noexec, so test binaries are linked into the workspace instead.
-	build := []string{"sh", "-c", "mkdir -p $HOME/gotmp && export GOTMPDIR=$HOME/gotmp && go build ./... && go test ./..."}
+	build := []string{"sh", "-c", "go build ./... && go test ./..."} // default TMPDIR=/tmp must be exec
 	if res := itRun(t, j, seeded, "", build...); res.Exit != 0 {
 		t.Fatalf("seeded build failed (exit %d): %s%s", res.Exit, res.Stdout, res.Stderr)
 	}
