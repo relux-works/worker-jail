@@ -1,6 +1,6 @@
-# worker-jail protocol v1
+# worker-jail protocol v1.1
 
-Status: normative for every remote worker of the relux-works swarm. Maintained by worker-jail-72 (orchestrator of relux-works/worker-jail).
+Status: normative for every remote worker of the relux-works swarm. v1.1 (2026-09-29) adds the write scope and the donor-profile rule to v1 (8233a12). Maintained by worker-jail-72 (orchestrator of relux-works/worker-jail).
 Changes go through a pull request that the orchestrators of the consuming projects ack (remote-worker-harness first).
 MUST, MUST NOT and SHOULD are used as in RFC 2119. This protocol supersedes the starting design in `design-brief.md` where they differ.
 
@@ -189,6 +189,7 @@ The harness MUST:
 7. Enforce its own per-project budgets on top of the jail's slots, check `usage`, and stop a worker that exceeds its disk quota.
 8. Deprovision a worker at the end of its life, and use `ls` to find the workspaces of dead sessions.
 9. Use images derived from `worker-jail/base` and built into the workers VM. Those images hold no secrets and declare no VOLUME.
+10. Keep the model's own tools off on the model host (the donor profile): every tool the model can call executes through `jail.Run`, so an injected task finds no local tool to abuse where the model runs.
 
 A worker whose tools run outside this jail, for example under Seatbelt only, does not meet this protocol and MUST NOT be presented as jailed.
 
