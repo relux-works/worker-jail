@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -222,5 +223,33 @@ func TestApplyGitPathOnlyInHeaders(t *testing.T) {
 	}
 	if gitPathInHeaders([]byte(gitHookPatch)) == "" {
 		t.Fatal("header .git path missed")
+	}
+}
+
+// Inherited GIT_DIR / GIT_INDEX_FILE never redirect host git: Apply and resolveBase act on the intended repo.
+func TestHostEnvIgnoresGitVars(t *testing.T) {
+	repo := newRepo(t)
+	decoy := newRepo(t)
+	writeFile(t, filepath.Join(decoy, "d.txt"), "d\n")
+	git(t, decoy, "add", "-A")
+	git(t, decoy, "commit", "-q", "-m", "decoy")
+	head := git(t, repo, "rev-parse", "HEAD")
+	patch := makePatch(t, repo, func(d string) { writeFile(t, filepath.Join(d, "a.txt"), "a\n") })
+	t.Setenv("GIT_DIR", filepath.Join(decoy, ".git"))
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(t.TempDir(), "bogus-index"))
+	for _, kv := range hostEnv() {
+		if strings.HasPrefix(kv, "GIT_") {
+			t.Fatalf("hostEnv leaks %s", kv)
+		}
+	}
+	base, _, err := resolveBase(context.Background(), repo, "HEAD")
+	if err != nil || base != head {
+		t.Fatalf("resolveBase %s %v, want %s", base, err, head)
+	}
+	if _, err := applyBytes(repo, patch, false); err != nil {
+		t.Fatal(err)
+	}
+	if !exists(filepath.Join(repo, "a.txt")) || exists(filepath.Join(decoy, "a.txt")) {
+		t.Fatal("patch applied to the wrong repo")
 	}
 }

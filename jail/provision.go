@@ -27,6 +27,7 @@ touch /work/.wj/provisioned
 
 func hostGit(ctx context.Context, repo string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", repo}, args...)...)
+	cmd.Env = hostEnv()
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {
@@ -124,7 +125,7 @@ func (j *Jail) cloneInto(ctx context.Context, s ProvisionSpec, base, fullref str
 	defer cancel()
 	bundle := exec.CommandContext(bctx, "git", "-C", s.Repo, "bundle", "create", "-", fullref)
 	var berr bytes.Buffer
-	bundle.Stderr = &berr
+	bundle.Stderr, bundle.Env = &berr, hostEnv()
 	pipe, err := bundle.StdoutPipe()
 	if err != nil {
 		return err

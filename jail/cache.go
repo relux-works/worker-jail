@@ -76,7 +76,7 @@ func (j *Jail) SeedGoMod(ctx context.Context, project, repo, refName string) err
 	if err != nil {
 		return err
 	}
-	env := append(os.Environ(), "GOMODCACHE="+mod, "GOFLAGS=-modcacherw", "GOTOOLCHAIN=local", "CGO_ENABLED=0",
+	env := append(hostEnv(), "GOMODCACHE="+mod, "GOFLAGS=-modcacherw", "GOTOOLCHAIN=local", "CGO_ENABLED=0",
 		"GOPROXY=file://"+filepath.ToSlash(filepath.Join(hostMod, "cache", "download"))+","+hostProxy)
 	for _, args := range [][]string{{"mod", "download"}, {"list", "-deps", "-test", "./..."}} {
 		cmd := exec.CommandContext(ctx, "go", args...)
@@ -99,7 +99,9 @@ func (j *Jail) SeedGoMod(ctx context.Context, project, repo, refName string) err
 }
 
 func goEnv(ctx context.Context, name string) (string, error) {
-	out, err := exec.CommandContext(ctx, "go", "env", name).Output()
+	cmd := exec.CommandContext(ctx, "go", "env", name)
+	cmd.Env = hostEnv()
+	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("jail: go env %s: %w", name, err)
 	}
@@ -111,7 +113,7 @@ func extractArchive(ctx context.Context, repo, rev, dst string) error {
 	cmd := exec.CommandContext(ctx, "git", "-C", repo, "archive", "--format=tar", rev)
 	var errb limitBuffer
 	errb.buf, errb.max = new(bytes.Buffer), 1<<20
-	cmd.Stderr = &errb
+	cmd.Stderr, cmd.Env = &errb, hostEnv()
 	pipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return err

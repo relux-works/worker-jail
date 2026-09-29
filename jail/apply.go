@@ -25,7 +25,7 @@ type ApplyReport struct {
 
 func applyGit(ctx context.Context, repo, index string, stdin []byte, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", repo, "-c", "core.hooksPath=/dev/null"}, args...)...)
-	cmd.Env = os.Environ()
+	cmd.Env = hostEnv()
 	if index != "" {
 		cmd.Env = append(cmd.Env, "GIT_INDEX_FILE="+index)
 	}
@@ -133,6 +133,18 @@ func gitPathInHeaders(patch []byte) string {
 		}
 	}
 	return ""
+}
+
+// hostEnv is the host environment without GIT_* variables, so no inherited GIT_DIR,
+// GIT_INDEX_FILE or similar can redirect a host git or go command.
+func hostEnv() []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "GIT_") {
+			env = append(env, kv)
+		}
+	}
+	return env
 }
 
 func isGitPath(path string) bool {
