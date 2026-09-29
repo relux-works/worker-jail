@@ -157,3 +157,10 @@ func TestDeprovision(t *testing.T) {
 		t.Fatalf("busy: %v", err)
 	}
 }
+
+// The export script fails on a failing pipeline stage (pipefail), not only on the last command.
+func TestExportScriptPipefail(t *testing.T) {
+	if !strings.HasPrefix(exportScript, "set -eu\nset -o pipefail\n") {
+		t.Fatalf("script head %q", exportScript[:30])
+	}
+}

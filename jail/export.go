@@ -12,6 +12,7 @@ import (
 )
 
 const exportScript = `set -eu
+set -o pipefail
 objs=$(git rev-parse --git-path objects); case "$objs" in /*) ;; *) objs="$PWD/$objs";; esac
 mkdir -p /tmp/wj-objects
 export GIT_INDEX_FILE=/tmp/wj-export.idx GIT_OBJECT_DIRECTORY=/tmp/wj-objects GIT_ALTERNATE_OBJECT_DIRECTORIES="$objs"
