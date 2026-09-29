@@ -134,7 +134,7 @@ The reference implementation is the Go package `github.com/relux-works/worker-ja
 | `export P W [-o FILE]` | Writes the patch from base to the workspace: committed, modified and untracked non-ignored files, binary-safe. It is built in a call that mounts the workspace read-only and is capped at 64 MiB. The patch's sha256 is recorded on the host. |
 | `apply --repo R [--allow-review-required] PATCH` | Host side; see section 8. |
 | `deprovision P W [--force]` | Refuses while a call is running. Unless forced, also refuses if the workspace differs both from base and from the last export. Otherwise removes the workspace. |
-| `seed-cache P NAME < TAR`, `seed-gomod P --repo R [--ref F]` | Extracts a host-built tar into the project's cache NAME, inside a call. Seeding is additive. `seed-gomod` builds that tar with the host's Go from the base revision's `go.mod`, `go.sum` and package list, never from worker files. Calls of a project that has a `gomod` cache get `GOMODCACHE=/cache/gomod GOPROXY=off GOTOOLCHAIN=local GOFLAGS=-mod=readonly`. |
+| `seed-cache P NAME < TAR`, `seed-gomod P --repo R [--ref F]` | Extracts a host-built tar into the project's cache NAME, inside a call. Seeding is additive. `seed-gomod` builds that tar with the host's Go from the base revision's `go.mod`, `go.sum` and package list, never from worker files. Calls of a project that has a `gomod` cache get `GOMODCACHE=/cache/gomod GOPROXY=off GOTOOLCHAIN=local`; `GOFLAGS` is the image's choice. |
 | `usage P W` | Bytes used by the workspace. |
 | `ls [P]` | Workspaces (base, creation time), caches, and calls in flight. |
 | `kill [P [W]]` | Kills calls in flight. |
@@ -247,7 +247,7 @@ The jail creates every container with `docker create --rm -i` and runs it with `
 
 ```
 --network none --cap-drop ALL --security-opt no-new-privileges --read-only
---tmpfs /tmp:rw,nosuid,nodev,size=512m --user 10001:10001 --init
+--tmpfs /tmp:rw,exec,nosuid,nodev,size=512m --user 10001:10001 --init
 --cpus 2 --memory 2g --memory-swap 2g --pids-limit 512
 --ulimit nofile=4096:4096 --ulimit fsize=<2 GiB> --ulimit core=0 --log-driver none
 --label ai.relux.worker-jail=1 --label ai.relux.worker-jail.kind=call --label ai.relux.worker-jail.project=<P> [--label ai.relux.worker-jail.worker=<W>]
@@ -256,4 +256,4 @@ The jail creates every container with `docker create --rm -i` and runs it with `
 <image> timeout -s KILL <timeout + 5 s> <argv...>
 ```
 
-Only named volumes are mounted; there is never a bind mount, `--privileged`, `--cap-add`, `--device`, or a host namespace. The limits above are the defaults; a caller may lower them, and raise them only up to the protocol maximums. The host kills a call at its timeout with `docker kill`. The in-container `timeout` is the backstop for when the host process has died.
+`/tmp` is `exec` on purpose: `/work` is executable anyway, and Docker's default `noexec` breaks `go test`. Only named volumes are mounted; there is never a bind mount, `--privileged`, `--cap-add`, `--device`, or a host namespace. The limits above are the defaults; a caller may lower them, and raise them only up to the protocol maximums. The host kills a call at its timeout with `docker kill`. The in-container `timeout` is the backstop for when the host process has died.
