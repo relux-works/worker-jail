@@ -36,6 +36,9 @@ func (c *cappedWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// killWait bounds how long call waits for `docker start` to return after `docker kill`.
+var killWait = 30 * time.Second
+
 // call runs one container: slots, create, start -a -i, caps, kill. stdout goes to out (capped at maxOut).
 func (j *Jail) call(ctx context.Context, s callSpec, stdin io.Reader, out io.Writer, maxOut int) (Result, []byte, error) {
 	var res Result
@@ -90,20 +93,23 @@ func (j *Jail) call(ctx context.Context, s callSpec, stdin io.Reader, out io.Wri
 	defer timer.Stop()
 	var r startRes
 	var ctxErr error
+	stopped := true
 	select {
 	case r = <-done:
 	case <-timer.C:
-		res.TimedOut = true
-		j.kill(id)
-		r = <-done
+		res.TimedOut, stopped = true, false
 	case <-overflow:
-		res.Truncated = true
-		j.kill(id)
-		r = <-done
+		res.Truncated, stopped = true, false
 	case <-ctx.Done():
-		ctxErr = ctx.Err()
+		ctxErr, stopped = ctx.Err(), false
+	}
+	if !stopped {
 		j.kill(id)
-		r = <-done
+		select {
+		case r = <-done:
+		case <-time.After(killWait):
+			return res, nil, fmt.Errorf("jail: container %s did not stop after kill", id)
+		}
 	}
 	res.Exit = r.exit
 	res.Stderr = errBuf.Bytes()

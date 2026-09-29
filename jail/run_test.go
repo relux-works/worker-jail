@@ -204,3 +204,26 @@ func TestCappedWriter(t *testing.T) {
 		t.Fatalf("kept %q n=%d signals=%d", sb.String(), c.n, len(ch))
 	}
 }
+
+// If start never returns after kill, the call fails with an error instead of hanging; control: a start that honours kill returns TimedOut.
+func TestRunKillWaitBounded(t *testing.T) {
+	old := killWait
+	killWait = 100 * time.Millisecond
+	t.Cleanup(func() { killWait = old })
+	fd := newFakeDocker()
+	addWorkspace(fd, "p1", "w1", strings.Repeat("a", 40))
+	stuck := make(chan struct{})
+	t.Cleanup(func() { close(stuck) })
+	fd.onStart = func(c *fakeCall) int { <-stuck; return 137 }
+	j := newTestJail(t, fd)
+	start := time.Now()
+	_, err := j.Run(context.Background(), Ref{"p1", "w1"}, RunSpec{Argv: []string{"sleep"}, Timeout: 50 * time.Millisecond})
+	if err == nil || !strings.Contains(err.Error(), "did not stop after kill") || time.Since(start) > 5*time.Second {
+		t.Fatalf("err %v after %v", err, time.Since(start))
+	}
+	fd.onStart = func(c *fakeCall) int { <-c.killed; return 137 }
+	res, err := j.Run(context.Background(), Ref{"p1", "w1"}, RunSpec{Argv: []string{"sleep"}, Timeout: 50 * time.Millisecond})
+	if err != nil || !res.TimedOut {
+		t.Fatalf("control: %+v %v", res, err)
+	}
+}
