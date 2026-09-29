@@ -113,7 +113,7 @@ func createArgs(s callSpec) ([]string, error) {
 	}
 	a = append(a, "-w", s.Workdir, "-e", "HOME=/work/home", "-e", "TMPDIR=/tmp")
 	if gomod {
-		a = append(a, "-e", "GOMODCACHE=/cache/gomod", "-e", "GOPROXY=off", "-e", "GOTOOLCHAIN=local", "-e", "GOFLAGS=-mod=readonly")
+		a = append(a, "-e", "GOMODCACHE=/cache/gomod", "-e", "GOPROXY=off", "-e", "GOTOOLCHAIN=local")
 	}
 	secs := int64(math.Ceil(s.Timeout.Seconds())) + 5
 	a = append(a, s.Image, "timeout", "-s", "KILL", strconv.FormatInt(secs, 10))

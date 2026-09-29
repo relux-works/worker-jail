@@ -187,6 +187,9 @@ func TestRunCachesAndGoEnv(t *testing.T) {
 	if !hasPair(a, "--mount", "type=volume,src=wj-cache.p1.gomod,dst=/cache/gomod,readonly") || !hasPair(a, "-e", "GOPROXY=off") {
 		t.Fatalf("gomod cache/env missing: %q", a)
 	}
+	if strings.Contains(strings.Join(a, " "), "GOFLAGS") {
+		t.Fatalf("GOFLAGS is the image's policy, jail must not set it: %q", a)
+	}
 }
 
 // cappedWriter keeps max bytes, counts the rest and signals once.

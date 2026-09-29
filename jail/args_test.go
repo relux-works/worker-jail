@@ -50,7 +50,7 @@ func TestCreateArgsGolden(t *testing.T) {
 			"--mount", "type=volume,src=wj-cache.p1.gomod,dst=/cache/gomod,readonly",
 			"--mount", "type=volume,src=wj-cache.p1.npm,dst=/cache/npm,readonly",
 			"-w", "/work/src", "-e", "HOME=/work/home", "-e", "TMPDIR=/tmp",
-			"-e", "GOMODCACHE=/cache/gomod", "-e", "GOPROXY=off", "-e", "GOTOOLCHAIN=local", "-e", "GOFLAGS=-mod=readonly",
+			"-e", "GOMODCACHE=/cache/gomod", "-e", "GOPROXY=off", "-e", "GOTOOLCHAIN=local",
 			DefaultImage, "timeout", "-s", "KILL", "605", "make", "test")...)},
 		{"call without caches", plain, append(hardening("w1"), tail(
 			"--mount", "type=volume,src=wj.p1.w1,dst=/work",
