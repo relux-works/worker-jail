@@ -888,6 +888,18 @@ git config core.hooksPath .git/hooks && echo planted > planted.txt`, marker))
 			row.Control = rtOutcome{err == nil && fileExists(filepath.Join(clone2, ".github/workflows/x.yml")), fmt.Sprintf("AllowReviewRequired: err=%v", err)}
 			row.Layers = []string{"Apply review gate (.github)"}
 		}},
+		{id: "G8-write-scope", tries: "worker changes Makefile and adds jail/evil_test.go outside scope docs/", run: func(e *rtEnv, row *rtRow) {
+			r := e.provision(Ref{e.p, "w-ws"})
+			e.jrun(r, time.Minute, "echo 'evil:' >> Makefile && mkdir -p jail && echo 'package jail' > jail/evil_test.go")
+			patch := e.export(r)
+			clone := e.hostClone()
+			rep, err := Apply(e.ctx, clone, bytes.NewReader(patch), ApplyOptions{AllowReviewRequired: true, WriteScope: []string{"docs/"}})
+			row.Jailed = rtOutcome{errors.Is(err, ErrOutOfScope) && !fileExists(filepath.Join(clone, "jail/evil_test.go")), fmt.Sprintf("err=%v outOfScope=%v", err, rep.OutOfScope)}
+			clone2 := e.hostClone()
+			_, err = Apply(e.ctx, clone2, bytes.NewReader(patch), ApplyOptions{})
+			row.Control = rtOutcome{err == nil && fileExists(filepath.Join(clone2, "jail/evil_test.go")), fmt.Sprintf("no scope: err=%v", err)}
+			row.Layers = []string{"write scope (apply)"}
+		}},
 		{id: "G8-hooks-apply", tries: "host post-index-change hook during Apply", run: func(e *rtEnv, row *rtRow) {
 			patch := e.patchH
 			if patch == nil {
