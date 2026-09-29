@@ -129,10 +129,13 @@ On exit 4 `apply` lists `flagged: <path> (<reason>)` and applies nothing. Read e
 
 ```sh
 bin/worker-jail --image worker-jail/go:1 provision --project myproj --worker verify-w-7f3a --repo .temp/review-w-7f3a --ref worker/w-7f3a-turn-3
-bin/worker-jail --image worker-jail/go:1 seed-gomod --project myproj --repo .temp/review-w-7f3a --ref worker/w-7f3a-turn-3
 bin/worker-jail --image worker-jail/go:1 run --project myproj --worker verify-w-7f3a --timeout 10m -- go test ./...
 bin/worker-jail deprovision --project myproj --worker verify-w-7f3a
 ```
+
+Never run `seed-gomod` on a worker branch. Seeding runs the host's Go, with the owner's credentials, on that ref's `go.mod`: a worker could name private
+modules of other repositories and have them copied into its project's cache, which its next calls can read. The verification workspace uses the cache
+seeded from `main`. If the change adds a dependency, the offline build fails; land the dependency on `main` yourself after review, reseed from `main`, and verify again.
 
 7. Worker-produced code (tests, Makefile targets, `go generate`, scripts) does not run on the host until the PR has landed.
 
