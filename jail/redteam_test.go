@@ -537,7 +537,7 @@ func rtProbes() []rtProbe {
 				rtStep{[]string{"seccomp", "AppArmor", "cap-drop ALL", "non-root user"}, []argMod{e.add(append(unconf, "--cap-add", "SYS_ADMIN")...), e.user("0:0")}})
 		}},
 		{id: "G3-docker-sock", tries: "curl --unix-socket /var/run/docker.sock http://d/_ping", run: func(e *rtEnv, row *rtRow) {
-			s := "curl -s -m 5 --unix-socket /var/run/docker.sock http://d/_ping; echo; echo rc=$?"
+			s := "curl -s -m 5 --unix-socket /var/run/docker.sock http://d/_ping; rc=$?; echo; echo rc=$rc"
 			_, out := e.jrun(e.a, time.Minute, s)
 			row.Jailed = rtOutcome{!strings.Contains(out, "OK"), ev(out)}
 			bind := e.add("--mount", "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock")

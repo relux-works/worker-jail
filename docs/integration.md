@@ -171,5 +171,5 @@ seeded from `main`. If the change adds a dependency, the offline build fails; la
 
 - `make it` (with `make image` first): the integration suite on the real VM, over throwaway `wjit-*` projects that it purges. It proves the
   provision, run, export, apply and deprovision path, timeouts, the output flood cap, that no container survives a call, and an offline Go build from a seeded cache.
-- `make redteam` (planned; neither the target nor the report exists at this commit): the probes and positive controls of protocol section 12, with its report in `docs/redteam-report.md`.
+- `make image-redteam && make redteam`: the probes and positive controls of protocol section 12 (about 2 minutes, in the test-only image `worker-jail/redteam:1`); the report of the accepted run is `docs/redteam-report.md`, and every run writes `.temp/redteam/report.{md,json}`.
 - rwh adds its own host-side probes on top (tool dispatch never leaves `jail.Run`, no secret in argv, stdin or environment).
