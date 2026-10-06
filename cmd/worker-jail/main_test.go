@@ -70,23 +70,23 @@ func TestPolicyExitCodes(t *testing.T) {
 		code int
 		out  string // substring of stdout, or of stderr when the code is not 0
 	}{
-		{[]string{"policy", "check", rev}, 0, "risk       LOW"},                                                       // a valid file
-		{[]string{"policy", "check", yolo}, 0, "risk       HIGH"},                                                     // egress modes are still checked
-		{[]string{"policy", "check", rev, "--json"}, 0, `"level": "LOW"`},                                             // flags after FILE
-		{[]string{"policy", "check", bad}, 1, "limits.pids"},                                                          // invalid: names the field
-		{[]string{"policy", "check", filepath.Join(e.dir, "missing.json")}, 3, "no such"},                             // not found
-		{[]string{"policy", "check"}, 2, "FILE"},                                                                      // usage
-		{[]string{"policy", "check", "--max-risk", "MEDIUM", yolo}, 4, "above --max-risk"},                            // above the limit
-		{[]string{"policy", "check", "--max-risk", "HIGH", yolo}, 0, "HIGH"},                                          // at the limit
-		{[]string{"policy", "check", "--max-risk", "high", yolo}, 2, "unknown risk"},                                  // bad level
-		{[]string{"policy", "set", "--project", "p1", "--worker", "w1", yolo}, 4, "note"},                             // HIGH without note
-		{[]string{"policy", "set", "--project", "p1", "--worker", "w1", noteYolo}, 5, "v2.1"},                         // egress
-		{[]string{"policy", "set", "--project", "p1", "--worker", "w1", all}, 4, "accept-risk CRITICAL"},              // CRITICAL
-		{[]string{"policy", "set", "--project", "p1", "--worker", "w1", "--accept-risk", "CRITICAL", all}, 5, "v2.1"}, // accepted, egress
+		{[]string{"policy", "check", rev}, 0, "risk       LOW"},                                                                       // a valid file
+		{[]string{"policy", "check", yolo}, 0, "risk       HIGH"},                                                                     // egress modes are still checked
+		{[]string{"policy", "check", rev, "--json"}, 0, `"level": "LOW"`},                                                             // flags after FILE
+		{[]string{"policy", "check", bad}, 1, "limits.pids"},                                                                          // invalid: names the field
+		{[]string{"policy", "check", filepath.Join(e.dir, "missing.json")}, 3, "no such"},                                             // not found
+		{[]string{"policy", "check"}, 2, "FILE"},                                                                                      // usage
+		{[]string{"policy", "check", "--max-risk", "MEDIUM", yolo}, 4, "above --max-risk"},                                            // above the limit
+		{[]string{"policy", "check", "--max-risk", "HIGH", yolo}, 0, "HIGH"},                                                          // at the limit
+		{[]string{"policy", "check", "--max-risk", "high", yolo}, 2, "unknown risk"},                                                  // bad level
+		{[]string{"policy", "show", "p1", "w1"}, 3, "no stored policy"},                                                               // nothing stored yet
+		{[]string{"policy", "set", "--project", "p1", "--worker", "w1", yolo}, 4, "note"},                                             // HIGH without note
+		{[]string{"policy", "set", "--project", "p1", "--worker", "w1", noteYolo}, 5, "egress not confirmed"},                         // HIGH with a note: stored, the service is absent
+		{[]string{"policy", "set", "--project", "p1", "--worker", "w1", all}, 4, "accept-risk CRITICAL"},                              // CRITICAL
+		{[]string{"policy", "set", "--project", "p1", "--worker", "w1", "--accept-risk", "CRITICAL", all}, 5, "egress not confirmed"}, // accepted: stored, the service is absent
 		{[]string{"policy", "set", "--project", "p1", "--worker", "w1", "--accept-risk", "HIGH", all}, 2, "only CRITICAL"},
 		{[]string{"policy", "set", "--project", "p1", "--worker", "w1", other}, 1, "project"}, // target mismatch
 		{[]string{"policy", "set", "--project", "p1", rev}, 2, "--worker"},                    // usage
-		{[]string{"policy", "show", "p1", "w1"}, 3, "no stored policy"},                       // nothing stored yet
 		{[]string{"policy", "set", "--project", "p1", "--worker", "w1", rev}, 0, "p1.w1 id="}, // stored
 		{[]string{"policy", "show", "p1", "w1"}, 0, "stored     "},
 		{[]string{"policy", "show", "p1", "w1", "--json"}, 0, `"policy_id"`},

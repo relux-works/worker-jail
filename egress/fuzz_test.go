@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"io"
+	"net/netip"
 	"strings"
 	"testing"
 )
@@ -133,4 +134,53 @@ func escape(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// FuzzParseAuthority (E5, E9): the CONNECT authority parser never panics, refuses only with grammar or host, and what
+// it accepts is canonical: a port in 1..65535, a lowercase host without a trailing dot, made of LDH labels with a
+// non-numeric last label, or an IP address in its canonical text (IPv4 for a mapped address). Canonicalisation is
+// idempotent: host:port parses back to itself. `go test -fuzz FuzzParseAuthority ./egress` explores.
+func FuzzParseAuthority(f *testing.F) {
+	for _, s := range []string{
+		"example.com:443", "EXAMPLE.COM.:443", "github.com.evil.io:443", "xn--bcher-kva.example:443",
+		"b%C3%BCcher.example:443", "bücher.example:443", "140.82.112.3:443", "[2001:db8::1]:443",
+		"[::ffff:127.0.0.1]:443", "[fe80::1%25eth0]:443", "127.1:443", "2130706433:80", "0x7f.0.0.1:443",
+		"%3A%3A1:443", "user@host:443", "host:0443", "host:65536", "host", "host:", "::1:443", "[::1",
+		"a..b:1", "-a.b:1", strings.Repeat("a.", 130) + "com:443",
+	} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, a string) {
+		host, port, err := parseAuthority(a, 0)
+		if err != nil {
+			ae, ok := err.(*authError)
+			if !ok || ae.code != CodeGrammar && ae.code != CodeHost {
+				t.Fatalf("%q: error %v", a, err)
+			}
+			return
+		}
+		if port < 1 || port > 65535 || host == "" || len(host) > maxHostBytes || strings.HasSuffix(host, ".") ||
+			strings.ToLower(host) != host {
+			t.Fatalf("%q: accepted %q %d", a, host, port)
+		}
+		if ip, err := netip.ParseAddr(host); err == nil {
+			if ip.String() != host || ip.Is4In6() || ip.Zone() != "" {
+				t.Fatalf("%q: IP %q not canonical", a, host)
+			}
+		} else {
+			for i := 0; i < len(host); i++ {
+				if c := host[i]; !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '.') {
+					t.Fatalf("%q: host %q has %q", a, host, c)
+				}
+			}
+			labels := strings.Split(host, ".")
+			if strings.Trim(labels[len(labels)-1], "0123456789") == "" {
+				t.Fatalf("%q: numeric host %q", a, host)
+			}
+		}
+		h2, p2, err := parseAuthority(hostPort(host, port), 0)
+		if err != nil || h2 != host || p2 != port {
+			t.Fatalf("%q: %q:%d does not parse back (%q %d %v)", a, host, port, h2, p2, err)
+		}
+	})
 }

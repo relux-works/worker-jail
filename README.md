@@ -7,7 +7,7 @@ workspace and the tools it was given, and unable to damage the host.
 **Design rule (owner): as simple and reliable as possible. One strong boundary, few moving parts, everything testable. No overloaded frameworks.**
 
 Consumers: `relux-works/remote-worker-harness` (runs the workers) and `relux-works/a2a-swarm` (the swarm's channel). Room: `#worker-jail:a2a.local`.
-**Normative spec: [`docs/protocol.md`](docs/protocol.md)** (v2.1 part A: v2.0, which is v1.1 plus the per-worker policy and worktree seeding, plus the egress service for network mode `modules`): the threat model, the jail's guarantees G1-G8, the interface, the network policy,
+**Normative spec: [`docs/protocol.md`](docs/protocol.md)** (v2.1: v2.0, which is v1.1 plus the per-worker policy and worktree seeding, plus the egress service for the network modes `modules`, `allowlist`, `denylist` and `all`): the threat model, the jail's guarantees G1-G8, the interface, the network policy,
 the change-extraction path, and what the harness, orchestrators and the operator must do.
 **Integration notes: [`docs/integration.md`](docs/integration.md)** (setup, the Go API walk-through, errors, capacity, reviewing patches, operations).
 Research (non-normative): `docs/research/` holds the apiary reconciliation, the Claude Code / Codex sandbox study and the egress proxy design draft.
@@ -26,9 +26,8 @@ host-owned and reviewed like code: the tools the harness exposes (`allowlist` wi
 pids, timeout, output cap, soft disk quota). `policy check` validates a file strictly and prints its effective risk (LOW to CRITICAL) and its
 id (sha256 of the canonical form). `policy set` stores it in `~/.local/state/worker-jail/policies/P.W.json`, refusing CRITICAL without
 `--accept-risk CRITICAL` and HIGH without a `note`. A new workspace is labelled with the policy's id and risk; `run` fails closed if the stored
-policy is gone or changed (re-provision to adopt a change) and applies its access and limits to every call. Network mode `modules`
-is served by the egress service (v2.1 part A, below); the generic modes `allowlist`, `denylist` and `all` are validated and rated but refused until a
-later v2.1 part. Start from a template:
+policy is gone or changed (re-provision to adopt a change) and applies its access and limits to every call. Every network mode
+but `none` (`modules`, `allowlist`, `denylist`, `all`) is served by the egress service (v2.1, below). Start from a template:
 
 ```sh
 bin/worker-jail policy template developer --project myproj --worker w1 --write-scope internal/,docs/ --go-modules 'golang\.org/x/.*' > w1.json
@@ -54,7 +53,7 @@ bin/worker-jail apply --repo ../myproj-story --allow-dirty --policy myproj.w1 --
 ```
 Spec: [`docs/protocol.md`](docs/protocol.md) section 15 and [`docs/design/v2/worktree-seeding.md`](docs/design/v2/worktree-seeding.md).
 
-## Egress for Go modules (v2.1 part A)
+## Egress for Go modules (v2.1)
 A worker whose policy has `network.mode: modules` can download the Go modules its `go_modules` masks allow, and nothing else.
 Its calls keep `--network none`; the only way out is its own Unix socket, mounted read-only from the volume `wj-egress-sock`, behind which
 one service container, `wj-egress` (`cmd/wj-egress`, image `worker-jail/egress:1`), answers the Go module proxy and checksum database grammar:
@@ -73,6 +72,29 @@ bin/worker-jail egress log --project myproj --worker w1 --since 1h
 ```
 Spec: [`docs/protocol.md`](docs/protocol.md) section 7 and [`docs/design/v2/egress.md`](docs/design/v2/egress.md).
 
+## Generic egress: allowlist, denylist, all (v2.1)
+A worker whose policy has `network.mode` `allowlist`, `denylist` or `all` reaches hosts through the same per-worker socket and service, as an
+HTTP proxy: `CONNECT host:port` tunnels (https and anything else over TCP) and absolute-URI `http://` `GET`/`HEAD`. The service canonicalises the
+host (lowercase, no trailing dot, IP literals in canonical form; non-ASCII IDNs are refused, send punycode) and checks it against the
+anchored `hosts` masks and the listed `ports` (80 and 443 are never implied): `allowlist` needs a match, `denylist` refuses any match (deny wins),
+`all` checks only the port. Then it dials through the dial guard; tunnels end after 60 s idle or 1 h, and their bytes count against
+`bytes_per_day`. Plain HTTP goes upstream in origin form with `Host` from the checked authority (a mismatching `Host` is refused) and without
+hop-by-hop or `Proxy-*` headers; redirects are passed back, not followed. The jail sets `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` to
+`http://127.0.0.1:3128` and an empty `NO_PROXY`; these are hints, the missing route is the enforcement.
+
+**Residual risk, stated plainly: there is no TLS interception.** The service sees host, port, bytes and timing, never the content of a tunnel.
+Exfiltration to or through allowed hosts (a push to an attacker's repository on an allowed `github.com`) and domain fronting are not contained,
+and `denylist` and `all` leave only the dial guard and the rate limits. So `allowlist` is HIGH (it needs a `note`) and `denylist` and `all`
+are CRITICAL (they need `--accept-risk CRITICAL`).
+
+```sh
+# hosts: ["proxy\\.golang\\.org"], ports: [443], a rate, and a note (HIGH)
+bin/worker-jail policy set --project myproj --worker w2 w2.json                       # myproj.w2 id=... risk=HIGH egress=confirmed
+bin/worker-jail run --project myproj --worker w2 -- curl -sS https://proxy.golang.org/   # through 127.0.0.1:3128 -> socat -> the service
+bin/worker-jail run --project myproj --worker w2 -- curl -sS https://example.com/        # CONNECT tunnel failed, response 403 (denied: host)
+```
+Spec: [`docs/protocol.md`](docs/protocol.md) sections 5 (known limits) and 7, and [`docs/design/v2/threat-model-by-mode.md`](docs/design/v2/threat-model-by-mode.md).
+
 ## Engineering baseline
 Go for tooling; tests with the go-testing-tools skill, including a red-team suite; signed commits; code and docs through PRs; local task-board (gitignored).
 
@@ -84,10 +106,10 @@ Go for tooling; tests with the go-testing-tools skill, including a red-team suit
 | `docker` CLI | talks only to the colima `workers` VM (`unix://$HOME/.colima/workers/docker.sock`); the jail pins the endpoint and an empty `DOCKER_CONFIG` itself | through the CLI or package, never directly (protocol section 6) | volumes `wj.<project>.<worker>`, `wj-cache.<project>.<name>`; containers `wj-call-*` (removed after each call); v2.1: the container `wj-egress`, its network `wj-egress-net` and volumes `wj-egress-sock`, `wj-egress-policy`, `wj-egress-cache` |
 | `colima` | `doctor` reads the VM's `/proc/mounts` via `colima ssh -p workers` | `bin/worker-jail doctor` | none |
 | `git` (host) | provision bundles, worktree snapshots (temporary repository, empty config), `apply` (hooks disabled), `seed-gomod` archives | via the CLI | none |
-| `wj-egress` | the egress service (v2.1 part A, network mode `modules`): `serve --sockroot D --policydir D --cachedir D`, `status P.W` (prints the loaded policy id or `none`, exit 0 or 3) | inside the container `wj-egress`, started by `worker-jail egress up`; `docker exec wj-egress wj-egress status P.W` | JSON log lines on its stdout (`worker-jail egress log`) |
+| `wj-egress` | the egress service (v2.1, every network mode but `none`): `serve --sockroot D --policydir D --cachedir D`, `status P.W` (prints the loaded policy id or `none`, exit 0 or 3) | inside the container `wj-egress`, started by `worker-jail egress up`; `docker exec wj-egress wj-egress status P.W` | JSON log lines on its stdout (`worker-jail egress log`) |
 | images | `worker-jail/base:1` (`images/base`, base image v2: adds `socat`), `worker-jail/go:1` (`images/go`), `worker-jail/egress:1` (`images/egress`, built from the repository root) | `make image` (builds into the workers VM) | images in the workers VM |
-| integration tests | the real VM path: provision, run, export, apply, deprovision, timeout, flood, no survivors, offline Go build, and (v2.1) `go mod download` through the egress service (needs `egress up` and internet) | `make image && make it` (sets `WJ_IT=1`) | test projects `wjit-*`, purged at the end |
+| integration tests | the real VM path: provision, run, export, apply, deprovision, timeout, flood, no survivors, offline Go build, and (v2.1) `go mod download` and an allowlisted `curl https://proxy.golang.org/` through the egress service (need `egress up` and internet) | `make image && make it` (sets `WJ_IT=1`) | test projects `wjit-*`, purged at the end |
 
 Exit codes of `worker-jail`: `run` exits with the call's status (124 on timeout); usage errors 2; jail errors 3 (including no stored policy, a changed policy, and the worktree refusals `ErrSnapshot`, `ErrSecret`, `ErrSeed`, `ErrDirtyTarget`);
-`apply` refused for review 4; `apply --write-scope P1,P2,...` or `apply --policy P.W` refused for a path outside the write scope 5; egress unavailable 5 (a generic network mode, or a `modules` policy whose id the egress service does not serve); `egress status` 5 unless the service runs and serves every networked policy's stored id.
+`apply` refused for review 4; `apply --write-scope P1,P2,...` or `apply --policy P.W` refused for a path outside the write scope 5; egress unavailable 5 (a policy with egress whose id the egress service does not serve); `egress status` 5 unless the service runs and serves every networked policy's stored id.
 `policy` commands: 0 ok, 1 invalid policy, 2 usage, 3 not found, 4 risk above `--max-risk` or not accepted, 5 egress unavailable or not confirmed.

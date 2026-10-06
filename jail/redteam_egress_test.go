@@ -13,14 +13,22 @@ import (
 	"time"
 )
 
-// The egress red-team probes of v2.1 part A (docs/design/v2/egress.md §8: E1, E2, E8, E10; E3 to E7 and E9 are unit
-// tests in egress/). WJ_REDTEAM=1, the images of `make image image-redteam` and a running service (`worker-jail egress
-// up`). The same style as TestRedTeam: every probe runs jailed and has a positive control; weakened containers exist
-// only here. Workers are modules policies of a wjrt-* project, withdrawn from the service and purged at the end.
+// The egress red-team probes of v2.1 (docs/design/v2/egress.md §8: E1, E2, E2-generic, E5, E8, E10; E3, E4, E6, E7 and
+// E9, and E5 in depth, are unit tests in egress/). WJ_REDTEAM=1, the images of `make image image-redteam` and a running
+// service (`worker-jail egress up`). The same style as TestRedTeam: every probe runs jailed and has a positive control;
+// weakened containers exist only here. Workers are modules or allowlist policies of a wjrt-* project, withdrawn from the
+// service and purged at the end.
 
 // rtModules is the probes' modules policy: golang.org/x/sync only.
 func rtModules(t *testing.T, r Ref) []byte {
 	return modulesPolicy(t, r.Project, r.Worker, `golang\.org/x/sync`)
+}
+
+// rtAllowlist is the probes' generic policy: an allowlist of proxy.golang.org on port 443 only (HIGH, with its note).
+func rtAllowlist(t *testing.T, r Ref) []byte {
+	return mut(t, string(testPolicy(r.Project, r.Worker)), set("note", "red-team E5 and E2-generic"),
+		set("network", map[string]any{"mode": NetAllowlist, "hosts": []string{`proxy\.golang\.org`}, "ports": []any{443},
+			"rate": map[string]any{"requests_per_min": 600, "max_conns": 8, "bytes_per_day": 1 << 30}}))
 }
 
 func (e *rtEnv) provisionModules(j *Jail, r Ref, repo string) Ref {
@@ -36,7 +44,7 @@ func (e *rtEnv) provisionModules(j *Jail, r Ref, repo string) Ref {
 // ctrlEgress is ctrlArgs for a modules call: the jail's own argv with the socket, env and relay, run with `docker run`
 // and weakened by mods.
 func (e *rtEnv) ctrlEgress(r Ref, script string, mods ...argMod) (string, int) {
-	args, err := createArgs(callSpec{Shape: shapeCall, Name: newCallName(), Project: r.Project, Worker: r.Worker, Egress: true,
+	args, err := createArgs(callSpec{Shape: shapeCall, Name: newCallName(), Project: r.Project, Worker: r.Worker, Egress: NetModules,
 		Workdir: "/work/src", Image: e.j.image, Limits: e.j.limits, Timeout: time.Minute, Argv: []string{"sh", "-c", script}})
 	if err != nil {
 		e.t.Fatal(err)
@@ -151,6 +159,21 @@ const askScript = `ask() { printf "$2" | socat -t 10 - UNIX-CONNECT:/run/wj/egre
 `
 
 func rtEgressProbes(refs *[]Ref) []rtProbe {
+	// gen provisions the allowlist worker on first use; it is withdrawn and purged with the others.
+	var g Ref
+	gen := func(e *rtEnv) Ref {
+		if g.Worker == "" {
+			g = Ref{e.p, "w-gen"}
+			*refs = append(*refs, g)
+			if _, err := e.j.SetPolicy(e.ctx, g, rtAllowlist(e.t, g), SetPolicyOptions{}); err != nil {
+				e.t.Fatalf("policy %v: %v", g, err)
+			}
+			if _, err := e.j.Provision(e.ctx, ProvisionSpec{Ref: g, Repo: e.repo}); err != nil {
+				e.t.Fatalf("provision %v: %v", g, err)
+			}
+		}
+		return g
+	}
 	return []rtProbe{
 		{id: "E1-socket-scope", tries: "list /run/wj for other workers' sockets, write into it, list interfaces", run: func(e *rtEnv, row *rtRow) {
 			s := `ls -A /run/wj; echo ---; touch /run/wj/x 2>/dev/null && echo WROTE; mkdir /run/wj/d 2>/dev/null && echo WROTE
@@ -182,6 +205,39 @@ ask unlisted 'GET /gomod/golang.org/x/text/@v/list HTTP/1.1\r\nHost: h\r\nConnec
 			row.Control = rtOutcome{strings.Contains(cout, "origin=200"), ev(cout)}
 			row.Layers = []string{"egress routing table (modules: origin-form GET/HEAD only)", "module masks"}
 		}},
+		{id: "E2-generic-mode-confusion", tries: "origin-form module GET, absolute-URI POST, https absolute URI and a Host mismatch on an allowlist socket",
+			run: func(e *rtEnv, row *rtRow) {
+				r := gen(e)
+				s := askScript + `ask origin 'GET /gomod/golang.org/x/sync/@v/list HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n'
+ask post 'POST http://proxy.golang.org/ HTTP/1.1\r\nHost: proxy.golang.org\r\nContent-Length: 0\r\n\r\n'
+ask https 'GET https://proxy.golang.org/ HTTP/1.1\r\nHost: proxy.golang.org\r\n\r\n'
+ask fronted 'GET http://proxy.golang.org:443/ HTTP/1.1\r\nHost: example.com\r\n\r\n'`
+				_, out := e.jrun(r, time.Minute, s)
+				row.Jailed = rtOutcome{strings.Contains(out, "origin=403 mode") && strings.Contains(out, "post=403 method") &&
+					strings.Contains(out, "https=403 grammar") && strings.Contains(out, "fronted=403 host"), ev(out)}
+				// Control: the permitted form, CONNECT to the listed host and port through the relay (HTTPS_PROXY).
+				res, cout := e.jrun(r, time.Minute, `curl -sS -o /dev/null -w 'CODE=%{http_code}\n' https://proxy.golang.org/`)
+				row.Control = rtOutcome{res.Exit == 0 && strings.Contains(cout, "CODE=") && !strings.Contains(cout, "CODE=000"),
+					fmt.Sprintf("exit %d: %s", res.Exit, ev(cout))}
+				row.Layers = []string{"egress routing table (generic: CONNECT and absolute-URI GET/HEAD only)", "Host checked against the authority"}
+			}},
+		{id: "E5-allowlist-anchoring", tries: "CONNECT to a suffix, a prefix, an IP literal, an unlisted port and an IDN of the allowlisted host",
+			run: func(e *rtEnv, row *rtRow) {
+				r := gen(e)
+				c := func(name, authority string) string {
+					return "ask " + name + " 'CONNECT " + authority + " HTTP/1.1\\r\\nHost: " + authority + "\\r\\n\\r\\n'\n"
+				}
+				// printf "$2" in ask: a literal % is written %%.
+				s := askScript + c("suffix", "proxy.golang.org.evil.io:443") + c("prefix", "evilproxy.golang.org:443") +
+					c("literal", "142.250.74.110:443") + c("port", "proxy.golang.org:80") + c("idn", "pr%%C3%%B6xy.golang.org:443")
+				_, out := e.jrun(r, 2*time.Minute, s)
+				row.Jailed = rtOutcome{strings.Contains(out, "suffix=403 host") && strings.Contains(out, "prefix=403 host") &&
+					strings.Contains(out, "literal=403 host") && strings.Contains(out, "port=403 port") && strings.Contains(out, "idn=403 host"), ev(out)}
+				// Control: the exact host, and its uppercase form with a trailing dot (the same canonical host), tunnel.
+				_, cout := e.jrun(r, 2*time.Minute, askScript+c("exact", "proxy.golang.org:443")+c("canonical", "PROXY.Golang.ORG.:443"))
+				row.Control = rtOutcome{strings.Contains(cout, "exact=200") && strings.Contains(cout, "canonical=200"), ev(cout)}
+				row.Layers = []string{"host masks anchored as ^(?:mask)$ on the canonical host", "ports listed explicitly", "IDNs refused"}
+			}},
 		{id: "E8-fail-closed", tries: "Run with a corrupt policy file, a stale loaded id, and the service stopped", run: func(e *rtEnv, row *rtRow) {
 			r, key := e.a, egressKey(e.a)
 			stored := rtModules(e.t, r)

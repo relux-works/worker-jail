@@ -1,5 +1,5 @@
-// Command worker-jail is the CLI of the worker-jail protocol (docs/protocol.md) v2.1 part A: policy, worktree seeding
-// and the egress service for network mode modules.
+// Command worker-jail is the CLI of the worker-jail protocol (docs/protocol.md) v2.1: policy, worktree seeding and the
+// egress service for the network modes modules, allowlist, denylist and all.
 package main
 
 import (
@@ -49,8 +49,8 @@ commands:
   egress log [--project P] [--worker W] [--since D]
 
 policy exit codes: 0 ok, 1 invalid policy, 2 usage, 3 not found, 4 risk above --max-risk or not accepted,
-5 egress unavailable: the generic modes (allowlist, denylist, all) arrive in a later v2.1 part, or the egress
-service did not confirm a modules policy (also from provision and run).
+5 egress unavailable: the egress service did not confirm a policy with egress (modules, allowlist, denylist, all;
+also from run).
 `
 
 type usageError struct{ msg string }
@@ -517,7 +517,7 @@ func (c *cli) purge(ctx context.Context, args []string) (int, error) {
 	return 0, c.j.Purge(ctx, *project)
 }
 
-// egress operates the egress service (v2.1 part A): up, down, status, log.
+// egress operates the egress service (v2.1): up, down, status, log.
 func (c *cli) egress(ctx context.Context, args []string) (int, error) {
 	if len(args) == 0 {
 		return 0, usageError{"egress needs up, down, status or log"}
@@ -561,8 +561,6 @@ func (c *cli) egress(ctx context.Context, args []string) (int, error) {
 		for _, w := range rep.Workers {
 			st := "ok"
 			switch {
-			case w.Mode != jail.NetModules:
-				st, code = "not served (the generic modes arrive in a later v2.1 part)", 5
 			case w.Loaded == "":
 				st, code = "NOT LOADED", 5
 			case w.Loaded != w.Stored:
@@ -722,7 +720,7 @@ func policySet(ctx context.Context, j *jail.Jail, args []string, stdout, stderr 
 		fmt.Fprintf(stderr, "warning: %s\n", w)
 	}
 	fmt.Fprintf(stdout, "%s.%s id=%s risk=%s", sp.Policy.Project, sp.Policy.Worker, sp.Policy.ID(), sp.Risk.Level)
-	if sp.Policy.Network.Mode == jail.NetModules {
+	if sp.Policy.Network.Mode != jail.NetNone {
 		fmt.Fprint(stdout, " egress=confirmed")
 	}
 	fmt.Fprintln(stdout)

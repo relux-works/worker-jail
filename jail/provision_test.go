@@ -224,7 +224,8 @@ func TestProvisionFromWorktree(t *testing.T) {
 }
 
 // Every refusal of a worktree provision comes before any volume or container exists: a secret, a snapshot
-// refusal, a repo or ref next to the worktree, and an override for a policy that egress already refuses in v2.0.
+// refusal, a repo or ref next to the worktree, an override under a HIGH (allowlist) or CRITICAL (all) policy
+// (design-owner decision 8), and a stored HIGH policy without a note.
 func TestProvisionFromWorktreeRefusals(t *testing.T) {
 	secret := newRepo(t)
 	writeFile(t, filepath.Join(secret, ".env"), "A=1\n")
@@ -233,6 +234,10 @@ func TestProvisionFromWorktreeRefusals(t *testing.T) {
 	high := strings.Replace(string(testPolicy("p1", "w1")), `"network":{"mode":"none"}`,
 		`"network":{"mode":"allowlist","hosts":["registry\\.npmjs\\.org"],"ports":[443],"rate":{"requests_per_min":60,"max_conns":4,"bytes_per_day":1048576}}`, 1)
 	high = strings.Replace(high, `"worker":"w1",`, `"worker":"w1","note":"npm",`, 1)
+	critical := strings.Replace(string(testPolicy("p1", "w1")), `"network":{"mode":"none"}`,
+		`"network":{"mode":"all","ports":[443],"rate":{"requests_per_min":60,"max_conns":4,"bytes_per_day":1048576}}`, 1)
+	noNote := strings.Replace(high, `"note":"npm",`, ``, 1)
+	override := SnapshotOptions{AllowSecretPaths: []string{".env"}}
 	for _, c := range []struct {
 		name   string
 		policy string
@@ -243,7 +248,9 @@ func TestProvisionFromWorktreeRefusals(t *testing.T) {
 		{"unborn HEAD", "", ProvisionSpec{FromWorktree: unborn}, ErrSnapshot},
 		{"repo and worktree", "", ProvisionSpec{FromWorktree: secret, Repo: secret}, nil},
 		{"ref and worktree", "", ProvisionSpec{FromWorktree: secret, RefName: "HEAD"}, nil},
-		{"HIGH policy with an override", high, ProvisionSpec{FromWorktree: secret, SnapshotOptions: SnapshotOptions{AllowSecretPaths: []string{".env"}}}, ErrEgressUnavailable},
+		{"HIGH policy with an override", high, ProvisionSpec{FromWorktree: secret, SnapshotOptions: override}, ErrSecret},
+		{"CRITICAL policy with an override", critical, ProvisionSpec{FromWorktree: secret, SnapshotOptions: override}, ErrSecret},
+		{"HIGH policy without a note", noNote, ProvisionSpec{FromWorktree: secret}, ErrRiskExceeded},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			fd := newFakeDocker()

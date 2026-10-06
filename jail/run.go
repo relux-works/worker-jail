@@ -12,8 +12,8 @@ import (
 // Run executes argv in a fresh container against the workspace. It errors only when the jail itself failed.
 // It re-reads the stored policy and fails closed before any container starts if the policy is gone or differs
 // from the one the workspace was provisioned under; then it applies the policy's access and limits.
-// For network.mode=modules it also fails closed (ErrEgressUnavailable) unless the egress service serves exactly the
-// stored policy, and the call gets the worker's socket (read-only), the modules env and the relay.
+// For a network mode other than none it also fails closed (ErrEgressUnavailable) unless the egress service serves
+// exactly the stored policy, and the call gets the worker's socket (read-only), the mode's env and the relay.
 func (j *Jail) Run(ctx context.Context, r Ref, s RunSpec) (Result, error) {
 	if err := r.validate(); err != nil {
 		return Result{}, err
@@ -21,7 +21,7 @@ func (j *Jail) Run(ctx context.Context, r Ref, s RunSpec) (Result, error) {
 	if len(s.Argv) == 0 {
 		return Result{}, errors.New("jail: empty argv")
 	}
-	pol, err := j.servedPolicy(r)
+	pol, err := j.LoadPolicy(r)
 	if err != nil {
 		return Result{}, err
 	}
@@ -60,8 +60,9 @@ func (j *Jail) Run(ctx context.Context, r Ref, s RunSpec) (Result, error) {
 		return Result{}, fmt.Errorf("%w: %s was provisioned under %s, the stored policy is %s; export, deprovision and provision it again",
 			ErrPolicyChanged, vol, id, pol.ID())
 	}
-	egress := pol.Network.Mode == NetModules
-	if egress {
+	egress := ""
+	if pol.Network.Mode != NetNone {
+		egress = pol.Network.Mode
 		if err := j.checkEgressLoaded(ctx, r, pol); err != nil {
 			return Result{}, err
 		}

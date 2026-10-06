@@ -1,5 +1,6 @@
-// Command wj-egress is the egress service of worker-jail v2.1 part A (docs/design/v2/egress.md): the modules mode.
-// It runs as the container wj-egress in the workers VM, started by `worker-jail egress up`.
+// Command wj-egress is the egress service of worker-jail v2.1 (docs/design/v2/egress.md): the modules mode and the
+// generic modes (allowlist, denylist, all). It runs as the container wj-egress in the workers VM, started by
+// `worker-jail egress up`.
 package main
 
 import (

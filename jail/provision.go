@@ -65,7 +65,10 @@ func resolveBase(ctx context.Context, repo, refName string) (base, fullref strin
 }
 
 // Provision creates and clones a workspace, or returns the existing one.
-// It refuses without a stored policy and labels a new workspace with the policy's id and risk.
+// It refuses without a stored policy, and refuses a stored HIGH policy without a note (the store holds only what
+// SetPolicy's risk gates passed, unless a file was placed by hand). A policy with egress provisions like none: the
+// clone needs no network, and doctor checks the egress service. A new workspace is labelled with the policy's id and
+// risk. A secret-guard override is refused for a HIGH or CRITICAL policy.
 // With FromWorktree the base is a snapshot commit of the worktree's current state (snapshot.go); the
 // worktree is never written, and the workspace is also labelled with the snapshot tree and parent.
 func (j *Jail) Provision(ctx context.Context, s ProvisionSpec) (Workspace, error) {
@@ -73,11 +76,14 @@ func (j *Jail) Provision(ctx context.Context, s ProvisionSpec) (Workspace, error
 	if err := s.Ref.validate(); err != nil {
 		return ws, err
 	}
-	pol, err := j.servedPolicy(s.Ref)
+	pol, err := j.LoadPolicy(s.Ref)
 	if err != nil {
 		return ws, err
 	}
 	risk := EffectiveRisk(pol).Level
+	if risk == RiskHigh && pol.Note == "" {
+		return ws, fmt.Errorf("%w: the stored %s policy has no note; store it with `worker-jail policy set`", ErrRiskExceeded, risk)
+	}
 	if s.FromWorktree != "" {
 		if s.Repo != "" || s.RefName != "" {
 			return ws, errors.New("jail: provision from a worktree takes no repo or ref")

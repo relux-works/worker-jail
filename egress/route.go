@@ -25,15 +25,18 @@ const (
 // Handlers a request can be routed to.
 const (
 	handlerModules = "modules"
-	handlerConnect = "connect" // generic, not served in v2.1 part A
-	handlerHTTP    = "http"    // generic, not served in v2.1 part A
+	handlerConnect = "connect" // generic: CONNECT host:port
+	handlerHTTP    = "http"    // generic: absolute-URI GET or HEAD
 )
 
 // route applies the routing table of egress.md §3 to a request on a listener of the given mode.
-// It returns the handler, or "" and the denial code. The generic handlers do not exist in v2.1 part A: every request
-// on a listener of another mode is denied with mode (no such listener is opened; this is the second line of defence).
+// It returns the handler, or "" and the denial code. A modules listener serves only the origin form, a generic listener
+// (allowlist, denylist, all) only CONNECT and the absolute form; the other forms are mode. Methods other than CONNECT,
+// GET and HEAD are method (a generic listener forwards no request body). On a listener of any other mode every request
+// is mode (no such listener is opened; this is the second line of defence).
 func route(mode string, req *Request) (handler, code string) {
-	if mode != jail.NetModules {
+	generic := mode == jail.NetAllowlist || mode == jail.NetDenylist || mode == jail.NetAll
+	if mode != jail.NetModules && !generic {
 		return "", CodeMode
 	}
 	h := ""
@@ -49,7 +52,7 @@ func route(mode string, req *Request) (handler, code string) {
 	default:
 		return "", CodeMethod
 	}
-	if h == handlerModules {
+	if (h == handlerModules) != generic {
 		return h, ""
 	}
 	return "", CodeMode

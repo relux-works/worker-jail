@@ -32,11 +32,11 @@ func (j *Jail) policyPath(r Ref) string {
 }
 
 // SetPolicy validates data as r's policy and stores it (0600, atomic rename).
-// It refuses a policy for another target, CRITICAL without AcceptRisk CRITICAL, HIGH without a note,
-// and the generic network modes (allowlist, denylist, all), which arrive in a later v2.1 part.
-// A modules policy is then delivered to the egress service (egress.md §6): the whole file is written into the policy
-// volume by a hardened call, the service is signalled, and SetPolicy waits until it reports the stored id. A failure
-// there is ErrEgressUnavailable; the policy stays stored, and Run fails closed until the service confirms it.
+// It refuses a policy for another target, CRITICAL without AcceptRisk CRITICAL and HIGH without a note.
+// A policy with egress (modules, allowlist, denylist, all) is then delivered to the egress service (egress.md §6): the
+// whole file is written into the policy volume by a hardened call, the service is signalled, and SetPolicy waits until
+// it reports the stored id. A failure there is ErrEgressUnavailable; the policy stays stored, and Run fails closed until
+// the service confirms it.
 // A policy that replaces one with egress withdraws the old one from the service.
 func (j *Jail) SetPolicy(ctx context.Context, r Ref, data []byte, o SetPolicyOptions) (StoredPolicy, error) {
 	var sp StoredPolicy
@@ -51,13 +51,7 @@ func (j *Jail) SetPolicy(ctx context.Context, r Ref, data []byte, o SetPolicyOpt
 		return sp, err
 	}
 	risk := EffectiveRisk(p)
-	switch {
-	case risk.Level >= RiskCritical && o.AcceptRisk != RiskCritical:
-		return sp, fmt.Errorf("%w: %s needs an explicit accept-risk CRITICAL", ErrRiskExceeded, risk.Level)
-	case risk.Level == RiskHigh && p.Note == "":
-		return sp, fmt.Errorf("%w: %s needs a note recording the reason", ErrRiskExceeded, risk.Level)
-	}
-	if err := servedMode(p); err != nil {
+	if err := riskGate(p, risk.Level, o.AcceptRisk); err != nil {
 		return sp, err
 	}
 	prev, _ := j.LoadPolicy(r)
@@ -66,7 +60,7 @@ func (j *Jail) SetPolicy(ctx context.Context, r Ref, data []byte, o SetPolicyOpt
 		return StoredPolicy{}, fmt.Errorf("jail: store policy: %w", err)
 	}
 	switch {
-	case p.Network.Mode == NetModules:
+	case p.Network.Mode != NetNone:
 		if err := j.deliverEgress(ctx, r, data, p); err != nil {
 			if !errors.Is(err, ErrEgressUnavailable) {
 				err = fmt.Errorf("%w: %w", ErrEgressUnavailable, err)
@@ -81,14 +75,15 @@ func (j *Jail) SetPolicy(ctx context.Context, r Ref, data []byte, o SetPolicyOpt
 	return sp, nil
 }
 
-// servedMode refuses the network modes this version does not serve: the generic ones (allowlist, denylist, all).
-func servedMode(p Policy) error {
-	switch p.Network.Mode {
-	case NetNone, NetModules:
-		return nil
+// riskGate is design-owner decision 7: CRITICAL needs an explicit accept-risk CRITICAL, HIGH needs a note.
+func riskGate(p Policy, level, accept Risk) error {
+	switch {
+	case level >= RiskCritical && accept != RiskCritical:
+		return fmt.Errorf("%w: %s needs an explicit accept-risk CRITICAL", ErrRiskExceeded, level)
+	case level == RiskHigh && p.Note == "":
+		return fmt.Errorf("%w: %s needs a note recording the reason", ErrRiskExceeded, level)
 	}
-	return fmt.Errorf("%w: network.mode %s: the generic modes (allowlist, denylist, all) arrive in a later v2.1 part; "+
-		"v2.1 part A serves none and modules", ErrEgressUnavailable, p.Network.Mode)
+	return nil
 }
 
 func matchTarget(p Policy, r Ref) error {
@@ -148,13 +143,4 @@ func (j *Jail) RemovePolicy(r Ref) error {
 		return fmt.Errorf("%w: %s.%s", ErrNoPolicy, r.Project, r.Worker)
 	}
 	return err
-}
-
-// servedPolicy loads r's policy for Provision and Run: it must exist, be valid and have a mode this version serves.
-func (j *Jail) servedPolicy(r Ref) (Policy, error) {
-	p, err := j.LoadPolicy(r)
-	if err != nil {
-		return p, err
-	}
-	return p, servedMode(p)
 }

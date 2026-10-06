@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-// The egress service of v2.1 part A (docs/design/v2/egress.md): one container in the workers VM, its network and its
+// The egress service of v2.1 (docs/design/v2/egress.md): one container in the workers VM, its network and its
 // three volumes. Only `egress up` creates them; a call mounts nothing of them but its own socket's subpath, read-only.
 const (
 	EgressContainer    = "wj-egress"

@@ -1,4 +1,4 @@
-# worker-jail integration notes (v1 to v2.1 part A)
+# worker-jail integration notes (v1 to v2.1)
 
 Status: informative. For remote-worker-harness (rwh) and for the orchestrators who review worker patches.
 The rules are in [`protocol.md`](protocol.md); where this page and the protocol differ, the protocol wins.
@@ -26,7 +26,7 @@ Never add `mounts:` or `--ssh-agent`. Build the images and the CLI, then check:
 ```sh
 make image    # worker-jail/base:1 (base image v2, with socat), worker-jail/go:1 and worker-jail/egress:1, built into the workers VM
 make build    # bin/worker-jail and bin/wj-egress
-bin/worker-jail egress up    # v2.1: only if a worker will have a modules policy; idempotent
+bin/worker-jail egress up    # v2.1: only if a worker will have a network mode other than none; idempotent
 bin/worker-jail doctor
 ```
 
@@ -44,7 +44,7 @@ When a stored policy has a network mode other than `none`, doctor adds a fourth 
 
 | image | built from | use |
 | --- | --- | --- |
-| `worker-jail/base:1` | `images/base` | The default (`jail.DefaultImage`). Debian trixie-slim, git, uid 10001, no setuid bits. Base image v2 (v2.1) adds `socat`, the relay of `modules` calls; rebuild derived images so they inherit it. |
+| `worker-jail/base:1` | `images/base` | The default (`jail.DefaultImage`). Debian trixie-slim, git, uid 10001, no setuid bits. Base image v2 (v2.1) adds `socat`, the relay of every call with egress; rebuild derived images so they inherit it. |
 | `worker-jail/go:1` | `images/go` | Reference Go-toolchain parent: base plus Go 1.25. |
 | `worker-jail/egress:1` | `images/egress` (context: the repository root) | v2.1: the egress service `wj-egress`. A static binary in an empty image; not a call image, never pass it as `--image`. |
 
@@ -58,6 +58,8 @@ docker --context colima-workers build --build-arg BASE=worker-jail/base:1 -t rwh
 Caches: `/cache/<name>` is the read-only volume `wj-cache.<project>.<name>`. When a project has a `gomod` cache, every call gets
 `GOMODCACHE=/cache/gomod GOPROXY=off GOTOOLCHAIN=local`. `GOFLAGS` is the image's choice (`worker-jail/go:1` sets none; rwh's image sets `-mod=mod`).
 v2.1: a call whose policy has `network.mode: modules` gets instead `GOPROXY=file:///cache/gomod/cache/download,http://127.0.0.1:3128/gomod GOMODCACHE=/work/home/go/pkg/mod GOSUMDB=sum.golang.org GOTOOLCHAIN=local`: the seeded cache first, then the egress service through the relay (protocol section 7).
+A call whose policy has `network.mode` `allowlist`, `denylist` or `all` keeps the `gomod` cache's environment (Go stays offline from the cache)
+and adds `HTTP_PROXY=HTTPS_PROXY=ALL_PROXY=http://127.0.0.1:3128` and an empty `NO_PROXY` (section 6c).
 
 ## 3. Go API: one worker session
 
@@ -113,7 +115,7 @@ that survives the turn for `Export` and `Deprovision`, so an interrupted turn is
 | `ErrReviewRequired` | Flagged paths (CI, hooks, agent files, symlinks, gitlinks); CLI exit 4. | Read every flagged hunk; only then re-run with `--allow-review-required`, or reject. |
 | `ErrNoPolicy` | No stored policy for (P, W) (v2.0). Provision and Run refuse; nothing is created. | Ask the operator for a policy (`worker-jail policy set`); never write one from worker input. |
 | `ErrPolicyChanged` | The stored policy's id differs from the workspace's label, or the workspace predates v2.0. Run refuses. | Export, deprovision, provision again (re-provision adopts the new policy). |
-| `ErrEgressUnavailable` | A generic `network.mode` (`allowlist`, `denylist`, `all`; a later v2.1 part), or (v2.1) a `modules` policy the egress service does not serve: service down or never set up, not confirmed by `policy set`, or a stale id at `run`. CLI exit 5. | Generic modes: use `none` or `modules`. Otherwise `worker-jail egress status`, `egress up`, then `policy set` again. |
+| `ErrEgressUnavailable` | v2.1: a policy with egress (`modules`, `allowlist`, `denylist`, `all`) that the egress service does not serve: service down or never set up, not confirmed by `policy set`, or a stale id at `run`. CLI exit 5. | `worker-jail egress status`, `egress up`, then `policy set` again. |
 | `ErrPolicyInvalid` | A policy breaks a rule; the message names the field and the rule. `policy` CLI exit 1. | Fix the file and review it like code. |
 | `ErrRiskExceeded` | `policy check --max-risk` exceeded, or `policy set` of CRITICAL without `--accept-risk CRITICAL` or HIGH without a `note`. CLI exit 4. | A decision for the operator, not the harness. |
 | `Result.TimedOut` | The call hit its timeout and was killed (CLI exit 124). | Report a timed-out tool call to the model. |
@@ -213,6 +215,44 @@ bin/worker-jail egress log --project myproj --worker w1 --since 10m    # one JSO
 - `policy rm` withdraws the policy from the service first (its socket and cache go); `deprovision` keeps the stored policy and its delivery.
 - A worker image must derive from base image v2 (it needs `socat`); otherwise a `modules` call exits 125 with a message naming the relay.
 
+## 6c. v2.1: hosts through the egress service (allowlist, denylist, all)
+
+A worker whose policy has `network.mode` `allowlist`, `denylist` or `all` reaches the hosts and ports its policy allows, through the same
+socket, relay and service as `modules`. Setup, delivery (`policy set` ... `egress=confirmed`), the loaded-id check at `run`, `policy rm` and the
+logs work the same; nothing changes for the harness.
+
+```json
+"network": {"mode": "allowlist", "hosts": ["proxy\\.golang\\.org"], "ports": [443],
+            "rate": {"requests_per_min": 600, "max_conns": 8, "bytes_per_day": 1073741824}}
+```
+
+```sh
+bin/worker-jail policy set --project myproj --worker w2 w2.json        # HIGH: the file needs a note; denylist/all: --accept-risk CRITICAL
+bin/worker-jail provision --project myproj --worker w2 --from-worktree ../myproj-story
+bin/worker-jail run --project myproj --worker w2 -- curl -sS https://proxy.golang.org/   # CONNECT proxy.golang.org:443 through the relay
+bin/worker-jail run --project myproj --worker w2 -- curl -sS https://example.com/        # curl: CONNECT tunnel failed, response 403
+bin/worker-jail egress log --project myproj --worker w2 --since 10m    # host, port, decision, code, bytes, end
+```
+
+- The call gets `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` set to `http://127.0.0.1:3128` and an empty `NO_PROXY`. They are hints: a tool
+  that ignores them has no route at all (`--network none`). curl honours `HTTPS_PROXY` and `ALL_PROXY`; Go, git and most package managers honour
+  `HTTPS_PROXY`/`HTTP_PROXY`. `GOPROXY` is not changed, so Go builds use the seeded `gomod` cache as before.
+- Served forms: `CONNECT host:port` (https and any other TCP protocol, as an opaque tunnel), and absolute-URI `GET` or `HEAD` of
+  `http://...` (plain HTTP). Everything else is refused in-band with `X-Worker-Jail-Denied`: `mode` (an origin-form request such as
+  `/gomod/...`: the generic modes have no module proxy), `method` (`POST`, `PUT`, ...: no request body leaves through plain HTTP; use https),
+  `grammar` (an `https://` absolute URI, userinfo, a bad port), `host` (no mask matched under `allowlist`, a mask matched under `denylist`, a
+  `Host` header that differs from the URI, a non-ASCII IDN), `port` (not listed: 80 and 443 are never implied), `guard` (a private, loopback,
+  link-local or metadata address, also behind a name), `rate`, and `502 upstream`.
+- Hosts are matched in canonical form against `^(?:mask)$`: write `proxy\.golang\.org`, not `proxy.golang.org` (an unescaped `.` gets a
+  warning from `policy check`). Uppercase and a trailing dot do not matter; `proxy.golang.org.evil.io` and IP literals do not match. A
+  `denylist` matches names only: an IP literal of a denied server passes. IDNs must be sent as punycode (`xn--...`).
+- A tunnel ends after 60 s without traffic or after 1 h; its bytes count against `bytes_per_day`, and the day's budget cuts it.
+  Redirects of plain HTTP are passed back to the client, which asks again and is checked again.
+- **Residual risk: no TLS interception.** The service never sees inside a tunnel. Anything the worker can read can be sent to an allowed host
+  (or through it: an attacker's repository on an allowed `github.com`, an upload to an allowed registry) or fronted through an allowed CDN
+  host. `denylist` and `all` contain only private addresses and volume. Give these modes only to workers whose readable content may leave,
+  keep `hosts` narrow, and watch `egress log` (new hosts, bytes near the limit, any `guard` denial).
+
 ## 7. What rwh no longer does for jailed workers
 
 - No host-side file tools: read, write, edit and search all run as `rwh-tool` inside `jail.Run`.
@@ -251,5 +291,5 @@ bin/worker-jail egress log --project myproj --worker w1 --since 10m    # one JSO
 - `make it` (with `make image` first): the integration suite on the real VM, over throwaway `wjit-*` projects that it purges. It proves the
   provision, run, export, apply and deprovision path, timeouts, the output flood cap, that no container survives a call, and an offline Go build from a seeded cache.
 - `make image-redteam && make redteam`: the probes and positive controls of protocol section 12 (about 2 minutes, in the test-only image `worker-jail/redteam:1`); the report of the accepted run is `docs/redteam-report.md`, and every run writes `.temp/redteam/report.{md,json}`.
-- v2.1: `make redteam` also runs the egress probes E1, E2, E8 and E10 (`TestRedTeamEgress`; needs `egress up`, writes `.temp/redteam/egress-report.json`), and `make it` runs `go mod download` through the service (needs `egress up` and internet). The service's parser, grammar, dial guard, rate limits, cache isolation, redirect refusal and fail-closed loading are unit tests (`go test ./egress`), with fuzz targets `FuzzReadRequest` and `FuzzModulesPath` (`go test -fuzz FuzzReadRequest ./egress`).
+- v2.1: `make redteam` also runs the egress probes E1, E2, E2-generic, E5 (allowlist anchoring against the real service), E8 and E10 (`TestRedTeamEgress`; needs `egress up`, writes `.temp/redteam/egress-report.json`), and `make it` runs `go mod download` and, under an allowlist of `proxy.golang.org:443`, `curl https://proxy.golang.org/` (and a refused `https://example.com/`) through the service (needs `egress up` and internet). The service's parser, grammar, dial guard, rate limits, cache isolation, redirect refusal and fail-closed loading are unit tests (`go test ./egress`), and so are the generic modes' forms, host masks, ports, deny-wins, header stripping, `Host` check, byte and tunnel caps and log fields; the fuzz targets are `FuzzReadRequest`, `FuzzModulesPath` and `FuzzParseAuthority` (`go test -fuzz FuzzParseAuthority ./egress`).
 - rwh adds its own host-side probes on top (tool dispatch never leaves `jail.Run`, no secret in argv, stdin or environment).

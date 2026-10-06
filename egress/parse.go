@@ -27,7 +27,11 @@ type Request struct {
 	ContentLength  int64 // -1 when absent
 	Close          bool  // Connection: close
 	HeadBytes      int
+	Header         []Field // every header line in order, as received; the generic HTTP handler forwards some
 }
+
+// Field is one header line of a request head.
+type Field struct{ Name, Value string }
 
 // readRequest reads one request head from br, strictly: CRLF line endings only, at most 8 KiB, exactly
 // HTTP/1.1, token methods and header names, no obs-fold, no control or non-ASCII bytes, exactly one Host,
@@ -101,6 +105,7 @@ func readRequest(br *bufio.Reader) (*Request, error) {
 		if !isFieldValue(value) {
 			return nil, malformed("header value")
 		}
+		req.Header = append(req.Header, Field{name, value})
 		switch strings.ToLower(name) {
 		case "host":
 			hosts++

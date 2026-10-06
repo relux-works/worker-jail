@@ -19,11 +19,16 @@ const (
 	shapeEgressPolicy              // the egress policy volume rw at /work, nothing else (v2.1)
 )
 
-// Environment and relay of a call whose policy has network.mode=modules (egress.md §1, §2). The relay is socat from the
-// base image: it listens on the call's loopback and forwards to the worker's socket. The wrapper waits until it listens
-// (0100007F:0C38 is 127.0.0.1:3128 in /proc/net/tcp), then execs the tool; the relay dies with the call.
+// Environment and relay of a call whose policy has a network mode other than none (egress.md §1, §2). The relay is
+// socat from the base image: it listens on the call's loopback and forwards to the worker's socket. The wrapper waits
+// until it listens (0100007F:0C38 is 127.0.0.1:3128 in /proc/net/tcp), then execs the tool; the relay dies with the
+// call. modules replaces the gomod cache's environment with modulesEnv. The generic modes add proxyEnv, hints for
+// the tools (the missing route is the enforcement), and keep the gomod cache's environment: GOPROXY is not touched.
 var modulesEnv = []string{"GOPROXY=file:///cache/gomod/cache/download,http://127.0.0.1:3128/gomod",
 	"GOMODCACHE=/work/home/go/pkg/mod", "GOSUMDB=sum.golang.org", "GOTOOLCHAIN=local"}
+
+var proxyEnv = []string{"HTTP_PROXY=http://127.0.0.1:3128", "HTTPS_PROXY=http://127.0.0.1:3128",
+	"ALL_PROXY=http://127.0.0.1:3128", "NO_PROXY="}
 
 const relayScript = `socat TCP-LISTEN:3128,bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:/run/wj/egress.sock &
 i=0
@@ -43,7 +48,7 @@ type callSpec struct {
 	Project  string
 	Worker   string   // call and read-only shapes
 	ReadOnly bool     // call shape: mount the workspace read-only (policy workspace.access)
-	Egress   bool     // call shape: mount the worker's egress socket, set the modules env and start the relay
+	Egress   string   // call shape: a network mode but none: the worker's egress socket, the mode's env and the relay
 	Cache    string   // seed shape: the cache being seeded
 	Caches   []string // call shape: caches mounted read-only
 	Workdir  string   // "/work" or "/work/src"
@@ -75,8 +80,14 @@ func createArgs(s callSpec) ([]string, error) {
 		return nil, fmt.Errorf("jail: invalid timeout %v", s.Timeout)
 	}
 	l := s.Limits
-	if s.Egress && (s.Shape != shapeCall || s.ReadOnly) {
-		return nil, fmt.Errorf("jail: only a read-write call mounts an egress socket")
+	switch s.Egress {
+	case "":
+	case NetModules, NetAllowlist, NetDenylist, NetAll:
+		if s.Shape != shapeCall || s.ReadOnly && s.Egress == NetModules {
+			return nil, fmt.Errorf("jail: only a call mounts an egress socket, and only a read-write one for modules")
+		}
+	default:
+		return nil, fmt.Errorf("jail: invalid egress mode %q", s.Egress)
 	}
 	a := []string{"create", "--rm", "-i", "--init", "--name", s.Name,
 		"--label", LabelRoot + "=1", "--label", LabelKind + "=" + KindCall,
@@ -141,21 +152,26 @@ func createArgs(s callSpec) ([]string, error) {
 		a = append(a, "--mount", "type=volume,src="+CacheVolume(s.Project, c)+",dst=/cache/"+c+",readonly")
 		gomod = gomod || c == "gomod"
 	}
-	if s.Egress {
+	if s.Egress != "" {
 		a = append(a, "--mount", "type=volume,src="+EgressSockVolume+",dst=/run/wj,volume-subpath="+s.Project+"."+s.Worker+",readonly")
 	}
 	a = append(a, "-w", s.Workdir, "-e", "HOME=/work/home", "-e", "TMPDIR=/tmp")
 	switch {
-	case s.Egress:
+	case s.Egress == NetModules:
 		for _, e := range modulesEnv {
 			a = append(a, "-e", e)
 		}
 	case gomod:
 		a = append(a, "-e", "GOMODCACHE=/cache/gomod", "-e", "GOPROXY=off", "-e", "GOTOOLCHAIN=local")
 	}
+	if s.Egress != "" && s.Egress != NetModules {
+		for _, e := range proxyEnv {
+			a = append(a, "-e", e)
+		}
+	}
 	secs := int64(math.Ceil(s.Timeout.Seconds())) + 5
 	a = append(a, s.Image, "timeout", "-s", "KILL", strconv.FormatInt(secs, 10))
-	if s.Egress {
+	if s.Egress != "" {
 		a = append(a, "sh", "-c", relayScript, "wj-relay")
 	}
 	return append(a, s.Argv...), nil

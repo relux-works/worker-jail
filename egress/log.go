@@ -20,14 +20,19 @@ type Entry struct {
 	Host     string `json:"host"`
 	Port     int    `json:"port"`
 	Path     string `json:"path"`
-	Decision string `json:"decision"` // allow | deny | error
-	Code     string `json:"code"`
-	Status   int    `json:"status"`
-	BytesIn  int64  `json:"bytes_in"`
-	BytesOut int64  `json:"bytes_out"`
-	DurMS    int64  `json:"dur_ms"`
-	Cache    string `json:"cache"` // hit | miss | ""
-	IP       string `json:"ip"`
+	// Plain HTTP only: the path is its first 256 bytes, query stripped; these are the full path's length and sha256.
+	PathLen    int    `json:"path_len,omitempty"`
+	PathSHA256 string `json:"path_sha256,omitempty"`
+	Decision   string `json:"decision"` // allow | deny | error
+	Code       string `json:"code"`
+	Status     int    `json:"status"`
+	BytesIn    int64  `json:"bytes_in"`
+	BytesOut   int64  `json:"bytes_out"`
+	DurMS      int64  `json:"dur_ms"`
+	Cache      string `json:"cache"` // hit | miss | ""
+	IP         string `json:"ip"`
+	// Generic exchanges only: why the tunnel or the response stream ended (eof, idle, lifetime, bytes, error).
+	End string `json:"end,omitempty"`
 }
 
 // event is a service log line: a policy loaded or refused, a listener opened or closed, a panic.

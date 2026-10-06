@@ -7,28 +7,35 @@ import (
 	"github.com/relux-works/worker-jail/jail"
 )
 
-// The routing table of egress.md §3 per mode (E2): in modules only origin-form GET and HEAD reach a handler;
-// CONNECT and absolute URIs are mode, other methods are method; on a listener of any other mode every request is mode.
+// The routing table of egress.md §3 per mode (E2): in modules only origin-form GET and HEAD reach a handler, and
+// CONNECT and absolute URIs are mode; in the generic modes only CONNECT and absolute-URI GET and HEAD reach a handler,
+// and the origin form is mode; other methods are method in both; on a none listener every request is mode.
 func TestRoute(t *testing.T) {
 	cases := []struct {
 		method, target string
 		modules        string // handler, or the denial code, on a modules listener
-		generic        string // on an allowlist listener (no handler in v2.1 part A)
+		generic        string // on an allowlist, denylist or all listener
 	}{
 		{"GET", "/gomod/golang.org/x/text/@v/list", handlerModules, CodeMode},
 		{"HEAD", "/gomod/golang.org/x/text/@v/list", handlerModules, CodeMode},
-		{"CONNECT", "proxy.golang.org:443", CodeMode, CodeMode},
-		{"GET", "http://proxy.golang.org/golang.org/x/text/@v/list", CodeMode, CodeMode},
-		{"GET", "HTTPS://example.com/", CodeMode, CodeMode},
-		{"POST", "/gomod/golang.org/x/text/@v/list", CodeMethod, CodeMode},
-		{"PUT", "http://example.com/", CodeMethod, CodeMode},
-		{"OPTIONS", "*", CodeMethod, CodeMode},
-		{"get", "/gomod/x", CodeMethod, CodeMode},
-		{"GET", "example.com:443", CodeMethod, CodeMode},
+		{"GET", "/", handlerModules, CodeMode},
+		{"CONNECT", "proxy.golang.org:443", CodeMode, handlerConnect},
+		{"CONNECT", "/gomod/x", CodeMode, handlerConnect}, // the CONNECT handler refuses the target (grammar)
+		{"GET", "http://proxy.golang.org/golang.org/x/text/@v/list", CodeMode, handlerHTTP},
+		{"HEAD", "http://example.com/", CodeMode, handlerHTTP},
+		{"GET", "HTTPS://example.com/", CodeMode, handlerHTTP}, // the HTTP handler refuses the scheme (grammar)
+		{"POST", "/gomod/golang.org/x/text/@v/list", CodeMethod, CodeMethod},
+		{"POST", "http://example.com/", CodeMethod, CodeMethod},
+		{"PUT", "http://example.com/", CodeMethod, CodeMethod},
+		{"DELETE", "http://example.com/", CodeMethod, CodeMethod},
+		{"OPTIONS", "*", CodeMethod, CodeMethod},
+		{"get", "/gomod/x", CodeMethod, CodeMethod},
+		{"connect", "example.com:443", CodeMethod, CodeMethod},
+		{"GET", "example.com:443", CodeMethod, CodeMethod},
 	}
 	for _, c := range cases {
 		for _, m := range []struct{ mode, want string }{{jail.NetModules, c.modules}, {jail.NetAllowlist, c.generic},
-			{jail.NetAll, c.generic}, {jail.NetNone, c.generic}} {
+			{jail.NetDenylist, c.generic}, {jail.NetAll, c.generic}, {jail.NetNone, CodeMode}, {"bogus", CodeMode}} {
 			h, code := route(m.mode, &Request{Method: c.method, Target: c.target})
 			got := h + code
 			if got != m.want || h != "" && code != "" {

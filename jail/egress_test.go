@@ -289,17 +289,26 @@ func TestRunNoneKeepsV20Args(t *testing.T) {
 	}
 }
 
-// createArgs: a modules call is only a read-write call shape; the policy-volume shape mounts that volume alone.
+// createArgs: a modules call is only a read-write call shape, a generic call any call shape (control: read-only
+// allowlist), an unknown mode is refused; the policy-volume shape mounts that volume alone.
 func TestCreateArgsEgressShapes(t *testing.T) {
 	ro := baseSpec(shapeCall)
-	ro.Egress, ro.ReadOnly = true, true
+	ro.Egress, ro.ReadOnly = NetModules, true
 	seed := baseSpec(shapeSeed)
-	seed.Worker, seed.Cache, seed.Egress = "", "gomod", true
+	seed.Worker, seed.Cache, seed.Egress = "", "gomod", NetAllowlist
+	bogus := baseSpec(shapeCall)
+	bogus.Egress = "whitelist"
 	pw := baseSpec(shapeEgressPolicy)
-	for name, s := range map[string]callSpec{"read-only egress": ro, "seed egress": seed, "policy shape with a worker": pw} {
+	for name, s := range map[string]callSpec{"read-only modules": ro, "seed egress": seed, "unnormalised mode": bogus,
+		"policy shape with a worker": pw} {
 		if _, err := createArgs(s); err == nil {
 			t.Errorf("%s accepted", name)
 		}
+	}
+	roAllow := baseSpec(shapeCall)
+	roAllow.Egress, roAllow.ReadOnly = NetAllowlist, true
+	if a, err := createArgs(roAllow); err != nil || !hasPair(a, "--mount", "type=volume,src=wj-egress-sock,dst=/run/wj,volume-subpath=p1.w1,readonly") {
+		t.Errorf("control: read-only allowlist: %v %q", err, a)
 	}
 	pw.Worker, pw.Workdir, pw.Argv = "", "/work", []string{"sh", "-c", egressPolicyScript, "sh", "init"}
 	a, err := createArgs(pw)
@@ -518,5 +527,214 @@ not json
 	rep, err := j.EgressStatus(context.Background())
 	if err != nil || rep.State != "running" || len(rep.Workers) != 1 || rep.Workers[0].Stored != id || rep.Workers[0].Loaded != id {
 		t.Fatalf("status %+v %v", rep, err)
+	}
+}
+
+// genericPolicyJ is testPolicy with a generic network mode: allowlist of registry.npmjs.org on 443 (HIGH), denylist of
+// it on every port (CRITICAL) or all on 443 (CRITICAL); edits follow (a note, another mode spelling, ...).
+func genericPolicyJ(t *testing.T, p, w, mode string, edits ...edit) []byte {
+	t.Helper()
+	n := map[string]any{"mode": mode, "ports": []any{443},
+		"rate": map[string]any{"requests_per_min": 600, "max_conns": 8, "bytes_per_day": 1 << 30}}
+	switch mode {
+	case NetAllowlist, "whitelist":
+		n["hosts"] = []string{`registry\.npmjs\.org`}
+	case NetDenylist, "blacklist":
+		n["hosts"], n["ports"] = []string{`registry\.npmjs\.org`}, []any{"*"}
+	}
+	return mut(t, string(testPolicy(p, w)), append([]edit{set("network", n)}, edits...)...)
+}
+
+// policy set of the generic modes keeps the risk gates of design-owner decision 7 and then delivers the policy like
+// modules: the whole file through a hardened policy call, a signal, and the service's confirmation of the id.
+// Each refusal (no note for HIGH, no accept-risk CRITICAL) sits next to the accepted control and leaves no file and no
+// docker call.
+func TestSetPolicyGenericModes(t *testing.T) {
+	shortEgressWait(t)
+	note := set("note", "registry only")
+	cases := []struct {
+		name string
+		data []byte
+		opt  SetPolicyOptions
+		want error
+		risk Risk
+	}{
+		{"allowlist without a note", genericPolicyJ(t, "p1", "w1", NetAllowlist), SetPolicyOptions{}, ErrRiskExceeded, 0},
+		{"allowlist with a note", genericPolicyJ(t, "p1", "w1", NetAllowlist, note), SetPolicyOptions{}, nil, RiskHigh},
+		{"whitelist alias with a note", genericPolicyJ(t, "p1", "w1", "whitelist", note), SetPolicyOptions{}, nil, RiskHigh},
+		{"allowlist that is all, not accepted", genericPolicyJ(t, "p1", "w1", NetAllowlist, note, set("network.hosts", []string{`.*`})),
+			SetPolicyOptions{}, ErrRiskExceeded, 0},
+		{"allowlist that is all, accepted", genericPolicyJ(t, "p1", "w1", NetAllowlist, note, set("network.hosts", []string{`.*`})),
+			SetPolicyOptions{AcceptRisk: RiskCritical}, nil, RiskCritical},
+		{"denylist, not accepted", genericPolicyJ(t, "p1", "w1", NetDenylist, note), SetPolicyOptions{AcceptRisk: RiskHigh}, ErrRiskExceeded, 0},
+		{"denylist, accepted", genericPolicyJ(t, "p1", "w1", NetDenylist), SetPolicyOptions{AcceptRisk: RiskCritical}, nil, RiskCritical},
+		{"blacklist alias, accepted", genericPolicyJ(t, "p1", "w1", "blacklist"), SetPolicyOptions{AcceptRisk: RiskCritical}, nil, RiskCritical},
+		{"all, not accepted", genericPolicyJ(t, "p1", "w1", NetAll), SetPolicyOptions{}, ErrRiskExceeded, 0},
+		{"all, accepted", genericPolicyJ(t, "p1", "w1", NetAll), SetPolicyOptions{AcceptRisk: RiskCritical}, nil, RiskCritical},
+		{"read-only allowlist with a note", genericPolicyJ(t, "p1", "w1", NetAllowlist, note, set("workspace.access", "read-only"),
+			set("workspace.write_scope", []string{})), SetPolicyOptions{}, nil, RiskHigh},
+	}
+	for _, c := range cases {
+		fd := egressFake(t)
+		j := newTestJail(t, fd)
+		sp, err := j.SetPolicy(context.Background(), Ref{"p1", "w1"}, c.data, c.opt)
+		if c.want != nil {
+			files, _ := os.ReadDir(j.state + "/policies")
+			if !errors.Is(err, c.want) || len(files) != 0 || len(fd.calls) != 0 {
+				t.Errorf("%s: err %v, %d files, %d docker calls", c.name, err, len(files), len(fd.calls))
+			}
+			continue
+		}
+		calls := egressCalls(fd)
+		if err != nil || sp.Risk.Level != c.risk || fd.loaded["p1.w1"] != sp.Policy.ID() || fd.hups != 1 || len(calls) != 1 ||
+			!reflect.DeepEqual(calls[0].argv(), []string{"sh", "-c", egressPolicyScript, "sh", "put", "p1.w1"}) {
+			t.Errorf("%s: %v risk %s loaded %v hups %d calls %d", c.name, err, sp.Risk.Level, fd.loaded, fd.hups, len(calls))
+		}
+	}
+	// A generic policy the service never confirms is stored but fails with ErrEgressUnavailable, as for modules.
+	fd := egressFake(t)
+	fd.onHUP = nil
+	j := newTestJail(t, fd)
+	if _, err := j.SetPolicy(context.Background(), Ref{"p1", "w1"}, genericPolicyJ(t, "p1", "w1", NetAll),
+		SetPolicyOptions{AcceptRisk: RiskCritical}); !errors.Is(err, ErrEgressUnavailable) || !strings.Contains(err.Error(), "did not confirm") {
+		t.Fatalf("unconfirmed: %v", err)
+	}
+}
+
+// Provision accepts each generic mode once doctor finds the egress service hardened, and labels the workspace with the
+// policy's id and risk; without the service doctor fails and nothing is created. A stored HIGH policy without a note
+// (a file placed by hand, not through policy set) is refused before any docker call.
+func TestProvisionGeneric(t *testing.T) {
+	note := set("note", "registry only")
+	for _, c := range []struct {
+		mode string
+		risk string
+	}{{NetAllowlist, "HIGH"}, {NetDenylist, "CRITICAL"}, {NetAll, "CRITICAL"}} {
+		repo := newRepo(t)
+		fd := egressFake(t)
+		fd.onStart = provisionStart(t, 1, 0)
+		j := newTestJail(t, fd)
+		data := genericPolicyJ(t, "p1", "w1", c.mode, note)
+		storePolicy(t, j, "p1", "w1", data)
+		fd.replies["inspect"] = fakeReply{err: "Error: No such object: wj-egress\n", exit: 1}
+		if _, err := j.Provision(context.Background(), ProvisionSpec{Ref: Ref{"p1", "w1"}, Repo: repo}); !errors.Is(err, ErrDoctor) {
+			t.Errorf("%s without the service: %v", c.mode, err)
+		}
+		if _, ok := fd.volumes["wj.p1.w1"]; ok {
+			t.Errorf("%s: workspace created without the service", c.mode)
+		}
+		fd.replies["inspect"] = fakeReply{out: hardenedEgress}
+		ws, err := j.Provision(context.Background(), ProvisionSpec{Ref: Ref{"p1", "w1"}, Repo: repo})
+		if err != nil || ws.PolicyID != policyID(t, data) || ws.Risk != c.risk || fd.volumes["wj.p1.w1"][LabelPolicyRisk] != c.risk {
+			t.Errorf("%s: provision %+v %v", c.mode, ws, err)
+		}
+	}
+	fd := egressFake(t)
+	j := newTestJail(t, fd)
+	storePolicy(t, j, "p1", "w1", genericPolicyJ(t, "p1", "w1", NetAllowlist))
+	if _, err := j.Provision(context.Background(), ProvisionSpec{Ref: Ref{"p1", "w1"}, Repo: newRepo(t)}); !errors.Is(err, ErrRiskExceeded) || len(fd.calls) != 0 {
+		t.Fatalf("HIGH without a note: %v, %d docker calls", err, len(fd.calls))
+	}
+}
+
+// genericWorkspace stores data as p1.w1's policy, labels the workspace with it and has the service load it.
+func genericWorkspace(t *testing.T, data []byte) (*fakeDocker, *Jail) {
+	fd := egressFake(t)
+	addWorkspace(fd, "p1", "w1", strings.Repeat("a", 40))
+	j := newTestJail(t, fd)
+	id := storePolicy(t, j, "p1", "w1", data)
+	fd.volumes["wj.p1.w1"][LabelPolicyID] = id
+	fd.loaded["p1.w1"] = id
+	return fd, j
+}
+
+// Run under each generic mode: the worker's socket only, read-only, through a subpath; HTTP_PROXY, HTTPS_PROXY and
+// ALL_PROXY at the relay and an empty NO_PROXY; the gomod cache's environment unchanged (no GOPROXY override, none of
+// the modules env); the relay before the tool; every hardening flag of a v2.0 call, --network none included. A
+// read-only allowlist policy mounts /work read-only with the socket. The loaded id is checked first: a stale one runs
+// nothing (control: the matching one runs).
+func TestRunGeneric(t *testing.T) {
+	note := set("note", "registry only")
+	for _, data := range [][]byte{genericPolicyJ(t, "p1", "w1", NetAllowlist, note), genericPolicyJ(t, "p1", "w1", NetDenylist),
+		genericPolicyJ(t, "p1", "w1", NetAll), genericPolicyJ(t, "p1", "w1", NetAllowlist, note, set("workspace.access", "read-only"),
+			set("workspace.write_scope", []string{}))} {
+		p, err := ParsePolicy(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		name := p.Network.Mode + " " + p.Workspace.Access
+		fd, j := genericWorkspace(t, data)
+		addCache(fd, "p1", "gomod")
+		if _, err := j.Run(context.Background(), Ref{"p1", "w1"}, RunSpec{Argv: []string{"curl", "-sS", "https://registry.npmjs.org/"}}); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		a := fd.starts[0].create
+		work := "type=volume,src=wj.p1.w1,dst=/work"
+		if p.Workspace.Access == "read-only" {
+			work += ",readonly"
+		}
+		for _, pair := range [][2]string{
+			{"--mount", work},
+			{"--mount", "type=volume,src=wj-cache.p1.gomod,dst=/cache/gomod,readonly"},
+			{"--mount", "type=volume,src=wj-egress-sock,dst=/run/wj,volume-subpath=p1.w1,readonly"},
+			{"-e", "HTTP_PROXY=http://127.0.0.1:3128"}, {"-e", "HTTPS_PROXY=http://127.0.0.1:3128"},
+			{"-e", "ALL_PROXY=http://127.0.0.1:3128"}, {"-e", "NO_PROXY="},
+			{"-e", "GOMODCACHE=/cache/gomod"}, {"-e", "GOPROXY=off"}, {"-e", "GOTOOLCHAIN=local"},
+			{"--network", "none"}, {"--cap-drop", "ALL"}, {"--security-opt", "no-new-privileges"}, {"--user", "10001:10001"},
+			{"--read-only", "--tmpfs"}, {"--log-driver", "none"},
+		} {
+			if !hasPair(a, pair[0], pair[1]) {
+				t.Errorf("%s: create args lack %s %s", name, pair[0], pair[1])
+			}
+		}
+		proxies := 0
+		for _, s := range a {
+			if strings.HasPrefix(s, "GOPROXY=") && s != "GOPROXY=off" || s == "GOSUMDB=sum.golang.org" || strings.Contains(s, EgressPolicyVolume) ||
+				strings.Contains(s, EgressCacheVolume) {
+				t.Errorf("%s: unexpected %s", name, s)
+			}
+			if strings.Contains(strings.ToLower(s), "_proxy=") {
+				proxies++
+			}
+		}
+		if proxies != 4 {
+			t.Errorf("%s: %d proxy variables", name, proxies)
+		}
+		if !reflect.DeepEqual(fd.starts[0].argv(), []string{"sh", "-c", relayScript, "wj-relay", "curl", "-sS", "https://registry.npmjs.org/"}) {
+			t.Errorf("%s: argv %q", name, fd.starts[0].argv())
+		}
+		if fd.count("exec wj-egress wj-egress status p1.w1") != 1 {
+			t.Errorf("%s: loaded id not checked", name)
+		}
+
+		fd, j = genericWorkspace(t, data)
+		fd.loaded["p1.w1"] = strings.Repeat("e", 64)
+		if _, err := j.Run(context.Background(), Ref{"p1", "w1"}, RunSpec{Argv: []string{"true"}}); !errors.Is(err, ErrEgressUnavailable) || fd.count("create") != 0 {
+			t.Errorf("%s: stale id: %v", name, err)
+		}
+	}
+	// Without a gomod cache a generic call has no Go environment at all.
+	fd, j := genericWorkspace(t, genericPolicyJ(t, "p1", "w1", NetAll))
+	if _, err := j.Run(context.Background(), Ref{"p1", "w1"}, RunSpec{Argv: []string{"true"}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range fd.starts[0].create {
+		if strings.HasPrefix(s, "GO") {
+			t.Errorf("Go variable without a gomod cache: %s", s)
+		}
+	}
+}
+
+// policy rm of a generic policy withdraws it from the service, as for modules.
+func TestRemovePolicyGeneric(t *testing.T) {
+	shortEgressWait(t)
+	fd := egressFake(t)
+	j := newTestJail(t, fd)
+	r := Ref{"p1", "w1"}
+	if _, err := j.SetPolicy(context.Background(), r, genericPolicyJ(t, "p1", "w1", NetAll), SetPolicyOptions{AcceptRisk: RiskCritical}); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.RemovePolicy(r); err != nil || fd.loaded["p1.w1"] != "" || fd.hups != 2 {
+		t.Fatalf("rm: %v loaded %v hups %d", err, fd.loaded, fd.hups)
 	}
 }

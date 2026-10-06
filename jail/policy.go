@@ -75,7 +75,7 @@ type WorkspacePolicy struct {
 	WriteScope []string `json:"write_scope"`
 }
 
-// NetworkPolicy is the call's egress. Only mode none is served in v2.0.
+// NetworkPolicy is the call's egress (served by the egress service since v2.1).
 type NetworkPolicy struct {
 	Mode      string      `json:"mode"`
 	GoModules []string    `json:"go_modules,omitzero"`

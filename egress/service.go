@@ -1,7 +1,8 @@
-// Package egress is the wj-egress service of worker-jail v2.1 part A (docs/design/v2/egress.md): one Unix-socket
-// listener per worker whose policy has network.mode=modules, a strict HTTP/1.1 parser, the Go module proxy and sumdb
-// grammar with the policy's module masks, fixed upstreams, a per-worker cache, a dial guard, in-band denials, JSON
-// logs, rate limits, and fail-closed policy loading. The generic modes (allowlist, denylist, all) are not served.
+// Package egress is the wj-egress service of worker-jail v2.1 (docs/design/v2/egress.md): one Unix-socket listener per
+// worker whose policy has a network mode other than none, a strict HTTP/1.1 parser, and one handler family per mode.
+// modules: the Go module proxy and sumdb grammar with the policy's module masks, fixed upstreams and a per-worker cache.
+// allowlist, denylist and all (generic.go): CONNECT and absolute-URI http with host masks and ports, without TLS
+// interception. Always on: a dial guard, in-band denials, JSON logs, rate limits, and fail-closed policy loading.
 package egress
 
 import (
@@ -67,6 +68,10 @@ type Service struct {
 	objectCap        int64
 	workerCap        int64
 	headerTimeout    time.Duration
+	idleTimeout      time.Duration // generic exchanges
+	tunnelLifetime   time.Duration
+	// dial is the generic handlers' dial guard (the modules client has its own over the same guard).
+	dial func(ctx context.Context, network, addr string) (net.Conn, error)
 
 	mu       sync.Mutex
 	workers  map[string]*worker
@@ -75,17 +80,18 @@ type Service struct {
 	wg       sync.WaitGroup
 }
 
-// served is a loaded policy with its compiled masks.
+// served is a loaded policy with its compiled masks: module masks for modules, the host rule for the generic modes.
 type served struct {
 	pol   jail.Policy
 	masks masks
+	rule  hostRule
 }
 
 type worker struct {
 	key, project, name string
 	cur                atomic.Pointer[served]
 	ln                 net.Listener
-	cache              *cache
+	cache              *cache // modules only; nil for the generic modes
 	lim                *limiter
 
 	mu     sync.Mutex
@@ -105,10 +111,12 @@ func New(cfg Config) (*Service, error) {
 	}
 	s := &Service{cfg: cfg, now: time.Now, proxyURL: "https://" + proxyHost, sumURL: "https://" + sumHost,
 		objectCap: DefaultObjectCap, workerCap: DefaultWorkerCap, headerTimeout: HeaderTimeout,
+		idleTimeout: IdleTimeout, tunnelLifetime: TunnelLifetime,
 		workers: map[string]*worker{}, limiters: map[string]*limiter{}}
 	s.log = &logger{w: cfg.Log, now: func() time.Time { return s.now() }}
 	g := &guard{resolver: net.DefaultResolver, timeout: ConnectTimeout}
 	s.client = newUpstreamClient(g.DialContext)
+	s.dial = g.DialContext
 	return s, nil
 }
 
@@ -162,7 +170,9 @@ func (s *Service) Close() {
 
 // Reload re-reads every policy file and opens or closes listeners (egress.md §5, §6). A file that is unreadable,
 // invalid, of another target or of an unknown version closes only its worker's listener. A worker whose file is gone,
-// or whose valid policy has a mode other than modules, loses its listener and its cache namespace.
+// or whose valid policy is none, loses its listener and its cache namespace. A worker whose mode changes gets a new
+// listener; one whose policy id changes keeps its listener, and its open connections (tunnels included) are closed,
+// so that the new policy decides every exchange from then on.
 func (s *Service) Reload() {
 	want := map[string]*served{}
 	keep := map[string]bool{} // workers whose cache survives: invalid files and an unreadable policy dir
@@ -182,11 +192,7 @@ func (s *Service) Reload() {
 			s.log.event(event{Event: "policy-invalid", Project: m[1], Worker: m[2], File: e.Name(), Error: err.Error()})
 			continue
 		}
-		if sv.pol.Network.Mode != jail.NetModules {
-			if sv.pol.Network.Mode != jail.NetNone {
-				s.log.event(event{Event: "policy-not-served", Project: m[1], Worker: m[2], PolicyID: sv.pol.ID(),
-					Mode: sv.pol.Network.Mode, Error: "the generic modes arrive in a later v2.1 part"})
-			}
+		if sv.pol.Network.Mode == jail.NetNone {
 			continue
 		}
 		want[key] = sv
@@ -194,7 +200,7 @@ func (s *Service) Reload() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for key, w := range s.workers {
-		if _, ok := want[key]; !ok {
+		if sv, ok := want[key]; !ok || sv.pol.Network.Mode != w.cur.Load().pol.Network.Mode {
 			s.closeWorker(w, !keep[key] && err == nil)
 			delete(s.workers, key)
 			s.log.event(event{Event: "listener-closed", Project: w.project, Worker: w.name})
@@ -203,7 +209,8 @@ func (s *Service) Reload() {
 	for key, sv := range want {
 		if w := s.workers[key]; w != nil {
 			if old := w.cur.Swap(sv); old.pol.ID() != sv.pol.ID() {
-				s.log.event(event{Event: "policy-loaded", Project: w.project, Worker: w.name, PolicyID: sv.pol.ID(), Mode: jail.NetModules})
+				w.closeConns()
+				s.log.event(event{Event: "policy-loaded", Project: w.project, Worker: w.name, PolicyID: sv.pol.ID(), Mode: sv.pol.Network.Mode})
 			}
 			w.lim.setRate(*sv.pol.Network.Rate)
 			continue
@@ -214,7 +221,7 @@ func (s *Service) Reload() {
 			continue
 		}
 		s.workers[key] = w
-		s.log.event(event{Event: "policy-loaded", Project: w.project, Worker: w.name, PolicyID: sv.pol.ID(), Mode: jail.NetModules})
+		s.log.event(event{Event: "policy-loaded", Project: w.project, Worker: w.name, PolicyID: sv.pol.ID(), Mode: sv.pol.Network.Mode})
 	}
 	if err == nil {
 		s.sweep(keep)
@@ -266,8 +273,13 @@ func (s *Service) loadFile(path, project, name string) (*served, error) {
 		return nil, fmt.Errorf("file names %s.%s, policy is for %s.%s", project, name, pol.Project, pol.Worker)
 	}
 	sv := &served{pol: pol}
-	if pol.Network.Mode == jail.NetModules {
+	switch pol.Network.Mode {
+	case jail.NetModules:
 		if sv.masks, err = compileMasks(pol.Network.GoModules); err != nil {
+			return nil, err
+		}
+	case jail.NetAllowlist, jail.NetDenylist, jail.NetAll:
+		if sv.rule, err = compileHostRule(pol.Network); err != nil {
 			return nil, err
 		}
 	}
@@ -286,9 +298,12 @@ func (s *Service) openWorker(key string, sv *served) (*worker, error) {
 	if err := os.Remove(sock); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
-	c, err := openCache(filepath.Join(s.cfg.CacheDir, key), s.workerCap)
-	if err != nil {
-		return nil, err
+	var c *cache
+	if sv.pol.Network.Mode == jail.NetModules {
+		var err error
+		if c, err = openCache(filepath.Join(s.cfg.CacheDir, key), s.workerCap); err != nil {
+			return nil, err
+		}
 	}
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
@@ -318,14 +333,21 @@ func (s *Service) closeWorker(w *worker, dropCache bool) {
 	w.ln.Close()
 	w.mu.Lock()
 	w.closed = true
-	for c := range w.conns {
-		c.Close()
-	}
 	w.mu.Unlock()
+	w.closeConns()
 	os.Remove(filepath.Join(s.cfg.SockRoot, w.key, SocketName))
 	os.Remove(filepath.Join(s.cfg.SockRoot, w.key))
-	if dropCache {
+	if dropCache && w.cache != nil {
 		removeCache(w.cache.dir)
+	}
+}
+
+// closeConns closes every open connection of the worker.
+func (w *worker) closeConns() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for c := range w.conns {
+		c.Close()
 	}
 }
 
@@ -394,7 +416,7 @@ func (s *Service) serveConn(w *worker, c net.Conn) {
 			return
 		}
 		c.SetReadDeadline(time.Time{})
-		keep := s.handle(w, sv, c, req, e, over)
+		keep := s.handle(w, sv, c, br, req, e, over)
 		s.finish(e, start)
 		if !keep || req.Close {
 			return
@@ -410,8 +432,9 @@ func (s *Service) finish(e *Entry, start time.Time) {
 }
 
 // handle answers one request and reports whether the connection may serve another.
-func (s *Service) handle(w *worker, sv *served, c net.Conn, req *Request, e *Entry, overConns bool) bool {
-	e.Method, e.Path, e.BytesIn = req.Method, logPath(req.Target), int64(req.HeadBytes)
+func (s *Service) handle(w *worker, sv *served, c net.Conn, br *bufio.Reader, req *Request, e *Entry, overConns bool) bool {
+	e.Method, e.BytesIn = req.Method, int64(req.HeadBytes)
+	logTarget(e, req)
 	now := s.now()
 	if overConns || !w.lim.request(now) || !w.lim.spend(int64(req.HeadBytes), now) {
 		return s.deny(c, e, CodeRate, "rate limit")
@@ -427,6 +450,12 @@ func (s *Service) handle(w *worker, sv *served, c net.Conn, req *Request, e *Ent
 	}
 	if req.ContentLength > 0 {
 		return s.deny(c, e, CodeGrammar, "request body")
+	}
+	switch h {
+	case handlerConnect:
+		return s.connect(w, sv, c, br, req, e)
+	case handlerHTTP:
+		return s.plainHTTP(w, sv, c, br, req, e)
 	}
 	p, err := parseModulesPath(req.Target)
 	if err != nil {

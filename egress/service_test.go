@@ -558,8 +558,8 @@ func TestCacheCaps(t *testing.T) {
 }
 
 // E8, fail closed: an invalid file closes only its worker's listener; a fixed file reopens it; a changed file is
-// served only after a reload (a stale id until then); a removed file, a none or generic mode, a file for another
-// target, a symlink and an unreadable policy directory all leave no listener.
+// served only after a reload (a stale id until then); a removed file, a none mode, a file for another target, a
+// symlink and an unreadable policy directory all leave no listener. Control: a generic (all) policy listens.
 func TestFailClosed(t *testing.T) {
 	e := newEnv(t)
 	e.put("p.a", defaultPolicy("p", "a"))
@@ -643,13 +643,14 @@ func TestFailClosed(t *testing.T) {
 	}
 	os.Symlink(filepath.Join(e.policy, "p.a.json"), filepath.Join(e.policy, "p.link.json"))
 	e.s.Reload()
-	for _, key := range []string{"p.none", "p.all", "p.other", "p.v2", "p.link"} {
+	for _, key := range []string{"p.none", "p.other", "p.v2", "p.link"} {
 		if listening(key) || e.s.Loaded(key) != "" {
 			t.Errorf("%s: listener open", key)
 		}
 	}
-	if !strings.Contains(e.log.String(), `"event":"policy-not-served","project":"p","worker":"all"`) {
-		t.Error("generic mode not logged")
+	if !listening("p.all") || e.s.Loaded("p.all") == "" ||
+		!strings.Contains(e.log.String(), `"event":"policy-loaded","project":"p","worker":"all"`) {
+		t.Error("control: the generic policy has no listener")
 	}
 
 	os.RemoveAll(e.policy)
@@ -724,18 +725,12 @@ func TestLogFields(t *testing.T) {
 	e.up.routes["/proxy/golang.org/x/text/@v/v0.14.0.info"] = text(200, "WJ-CANARY-BODY")
 	e.put("p.w", defaultPolicy("p", "w"))
 	e.s.Reload()
+	// A line is written when its exchange ends, which can be just after the client has read the response: wait for
+	// each line before the next request, so that the order is fixed.
 	e.do("p.w", "GET /gomod/golang.org/x/text/@v/v0.14.0.info HTTP/1.1\r\nHost: h\r\nX-Canary: WJ-CANARY-HDR\r\n\r\n")
+	waitLog(t, e, 1)
 	e.do("p.w", get("/gomod/github.com/evil/x/@v/list"))
-	var lines []map[string]any
-	for _, l := range strings.Split(strings.TrimSpace(e.log.String()), "\n") {
-		var m map[string]any
-		if err := json.Unmarshal([]byte(l), &m); err != nil {
-			t.Fatalf("not a JSON line: %q", l)
-		}
-		if _, ok := m["event"]; !ok {
-			lines = append(lines, m)
-		}
-	}
+	lines := waitLog(t, e, 2)
 	if len(lines) != 2 {
 		t.Fatalf("request lines: %v", lines)
 	}
@@ -804,6 +799,9 @@ func TestLogSinkStall(t *testing.T) {
 	}
 	c.Close()
 	close(g.gate)
+	for e.s.log.busySince.Load() != 0 { // the blocked write returns; until then the sink still counts as stalled
+		time.Sleep(5 * time.Millisecond)
+	}
 	if r := e.do("p.w", get("/gomod/golang.org/x/text/@v/list")); r.status != 200 {
 		t.Fatalf("after recovery: %+v", r)
 	}

@@ -43,7 +43,9 @@ func TestSetPolicyStores(t *testing.T) {
 	}
 }
 
-// SetPolicy refusals; none of them writes a file.
+// SetPolicy refusals; none of them writes a file or calls docker. The risk gates of design-owner decision 7 come
+// first: CRITICAL needs accept-risk CRITICAL and HIGH a note. Their positive controls (the generic modes accepted and
+// delivered) are in TestSetPolicyGenericModes.
 func TestSetPolicyRefusals(t *testing.T) {
 	rate := map[string]any{"requests_per_min": 60, "max_conns": 4, "bytes_per_day": 1 << 20}
 	all := mut(t, yoloExample, set("network", map[string]any{"mode": "all", "ports": []any{"*"}, "rate": rate}))
@@ -59,17 +61,17 @@ func TestSetPolicyRefusals(t *testing.T) {
 		{Ref{"webapp", "npm-1"}, all, SetPolicyOptions{}, ErrRiskExceeded, ""},
 		// accepting HIGH does not accept CRITICAL.
 		{Ref{"webapp", "npm-1"}, all, SetPolicyOptions{AcceptRisk: RiskHigh}, ErrRiskExceeded, ""},
-		// accepted CRITICAL passes the risk gate and then meets the egress gate: generic modes arrive in a later v2.1 part.
-		{Ref{"webapp", "npm-1"}, all, SetPolicyOptions{AcceptRisk: RiskCritical}, ErrEgressUnavailable, ""},
+		// denylist is CRITICAL too, with or without a note.
+		{Ref{"webapp", "npm-1"}, mut(t, yoloExample, set("network.mode", "denylist"), set("network.ports", []string{"*"}), set("note", "x")),
+			SetPolicyOptions{}, ErrRiskExceeded, ""},
+		// an allowlist whose mask matches a canary host is CRITICAL, a note does not accept it.
+		{Ref{"webapp", "npm-1"}, mut(t, yoloExample, set("network.hosts", []string{`.*`}), set("note", "x")), SetPolicyOptions{}, ErrRiskExceeded, ""},
 		// HIGH without a note.
 		{Ref{"webapp", "npm-1"}, []byte(yoloExample), SetPolicyOptions{}, ErrRiskExceeded, ""},
-		// HIGH with a note passes the risk gate and meets the egress gate (allowlist is generic).
-		{Ref{"webapp", "npm-1"}, mut(t, yoloExample, set("note", "registry only")), SetPolicyOptions{}, ErrEgressUnavailable, ""},
-		// denylist is generic too.
-		{Ref{"webapp", "npm-1"}, mut(t, yoloExample, set("network.mode", "denylist"), set("network.ports", []string{"*"})),
-			SetPolicyOptions{AcceptRisk: RiskCritical}, ErrEgressUnavailable, ""},
-		// The whitelist alias is refused the same way.
-		{Ref{"webapp", "npm-1"}, mut(t, yoloExample, set("network.mode", "whitelist"), set("note", "x")), SetPolicyOptions{}, ErrEgressUnavailable, ""},
+		// HIGH without a note, through the whitelist alias.
+		{Ref{"webapp", "npm-1"}, mut(t, yoloExample, set("network.mode", "whitelist")), SetPolicyOptions{}, ErrRiskExceeded, ""},
+		// HIGH without a note is not accepted by accept-risk CRITICAL either.
+		{Ref{"webapp", "npm-1"}, []byte(yoloExample), SetPolicyOptions{AcceptRisk: RiskCritical}, ErrRiskExceeded, ""},
 		// project must equal the target.
 		{Ref{"other", "rev-1"}, []byte(reviewerExample), SetPolicyOptions{}, ErrPolicyInvalid, "project"},
 		// worker must equal the target.
@@ -88,9 +90,6 @@ func TestSetPolicyRefusals(t *testing.T) {
 		var pe *PolicyError
 		if c.field != "" && (!errors.As(err, &pe) || pe.Field != c.field) {
 			t.Errorf("case %d: err %v, want field %s", i, err, c.field)
-		}
-		if c.want == ErrEgressUnavailable && !strings.Contains(err.Error(), "the generic modes (allowlist, denylist, all) arrive in a later v2.1 part") {
-			t.Errorf("case %d: egress message %q does not name v2.1", i, err)
 		}
 		if files, _ := os.ReadDir(j.state + "/policies"); len(files) != 0 || len(j.docker.(*fakeDocker).calls) != 0 {
 			t.Errorf("case %d: refused policy left %d files or called docker", i, len(files))
@@ -114,8 +113,8 @@ func TestLoadPolicyRevalidates(t *testing.T) {
 	}
 }
 
-// Provision without a stored policy, or with a generic network mode, fails before any docker call; a none policy
-// provisions (control). Provisioning under a modules policy is in egress_test.go.
+// Provision without a stored policy fails before any docker call; a none policy provisions (control). Provisioning
+// under a modules or generic policy is in egress_test.go.
 func TestProvisionNeedsPolicy(t *testing.T) {
 	repo := newRepo(t)
 	fd := newFakeDocker()
@@ -125,14 +124,9 @@ func TestProvisionNeedsPolicy(t *testing.T) {
 	if _, err := j.Provision(ctx, ProvisionSpec{Ref: Ref{"p1", "w1"}, Repo: repo}); !errors.Is(err, ErrNoPolicy) {
 		t.Fatalf("no policy: %v", err)
 	}
-	storePolicy(t, j, "webapp", "npm-1", []byte(yoloExample))
-	if _, err := j.Provision(ctx, ProvisionSpec{Ref: Ref{"webapp", "npm-1"}, Repo: repo}); !errors.Is(err, ErrEgressUnavailable) {
-		t.Fatalf("allowlist policy: %v", err)
-	}
 	if len(fd.calls) != 0 {
 		t.Fatalf("refused provision called docker: %v", fd.calls)
 	}
-	os.Remove(j.policyPath(Ref{"webapp", "npm-1"})) // else doctor checks the egress service for it
 	storePolicy(t, j, "p1", "w1", testPolicy("p1", "w1"))
 	if _, err := j.Provision(ctx, ProvisionSpec{Ref: Ref{"p1", "w1"}, Repo: repo}); err != nil {
 		t.Fatalf("control: %v", err)
@@ -140,7 +134,7 @@ func TestProvisionNeedsPolicy(t *testing.T) {
 }
 
 // Run fails closed before any container is created: deleted policy, changed policy, unlabelled workspace,
-// a generic network mode, and timeouts or output caps above the policy's.
+// a generic policy the egress service does not serve, and timeouts or output caps above the policy's.
 func TestRunPolicyFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	argv := RunSpec{Argv: []string{"true"}}
@@ -156,10 +150,10 @@ func TestRunPolicyFailsClosed(t *testing.T) {
 			storePolicy(t, j, "p1", "w1", mut(t, string(testPolicy("p1", "w1")), set("limits.pids", 1024)))
 		}, argv, ErrPolicyChanged, "provisioned under"},
 		{"unlabelled workspace", func(fd *fakeDocker, j *Jail) { delete(fd.volumes["wj.p1.w1"], LabelPolicyID) }, argv, ErrPolicyChanged, "before v2.0"},
-		{"generic egress policy", func(fd *fakeDocker, j *Jail) {
+		{"generic policy not loaded", func(fd *fakeDocker, j *Jail) {
 			id := storePolicy(t, j, "p1", "w1", mut(t, yoloExample, set("project", "p1"), set("worker", "w1")))
 			fd.volumes["wj.p1.w1"][LabelPolicyID] = id
-		}, argv, ErrEgressUnavailable, "v2.1"},
+		}, argv, ErrEgressUnavailable, "serves no policy for p1.w1"},
 		{"timeout above policy", func(fd *fakeDocker, j *Jail) {}, RunSpec{Argv: []string{"true"}, Timeout: 61 * time.Minute}, nil, "outside"},
 		{"max output above policy", func(fd *fakeDocker, j *Jail) {}, RunSpec{Argv: []string{"true"}, MaxOutput: 4<<20 + 1}, nil, "max_output_bytes"},
 	}

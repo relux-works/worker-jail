@@ -276,3 +276,47 @@ func TestIntegrationEgressModules(t *testing.T) {
 		t.Fatalf("egress log: %s", log.String())
 	}
 }
+
+// v2.1: an allowlist policy for proxy.golang.org:443 (VM and internet only; needs `worker-jail egress up` and the
+// redteam image, the only image with curl; the call's hardening is the same). policy set confirms the id; curl reaches
+// https://proxy.golang.org/ through HTTPS_PROXY, the relay and a CONNECT tunnel; https://example.com/ gets 403 host; the
+// egress log names both decisions. No TLS interception: the service sees only host and port.
+func TestIntegrationEgressAllowlist(t *testing.T) {
+	j := itJail(t, rtImage)
+	ctx := context.Background()
+	if state, err := j.egressState(ctx); err != nil || state != "running" {
+		t.Fatalf("the egress service is not running (worker-jail egress up): %q %v", state, err)
+	}
+	r := Ref{itProject(t, j), "w1"}
+	t.Cleanup(func() {
+		if err := j.RemovePolicy(r); err != nil {
+			t.Errorf("withdraw %v: %v", r, err)
+		}
+	})
+	data := mut(t, string(testPolicy(r.Project, r.Worker)), set("note", "integration: the Go module proxy only"),
+		set("network", map[string]any{"mode": NetAllowlist, "hosts": []string{`proxy\.golang\.org`}, "ports": []any{443},
+			"rate": map[string]any{"requests_per_min": 600, "max_conns": 8, "bytes_per_day": 1 << 30}}))
+	sp, err := j.SetPolicy(ctx, r, data, SetPolicyOptions{})
+	if err != nil || sp.Risk.Level != RiskHigh {
+		t.Fatalf("policy set: %v (risk %s)", err, sp.Risk.Level)
+	}
+	if _, err := j.Provision(ctx, ProvisionSpec{Ref: r, Repo: newRepo(t)}); err != nil {
+		t.Fatal(err)
+	}
+	res := itRun(t, j, r, "", "curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "https://proxy.golang.org/")
+	if code := strings.TrimSpace(string(res.Stdout)); res.Exit != 0 || code == "" || code == "000" {
+		t.Fatalf("curl https://proxy.golang.org/ (exit %d): %s%s", res.Exit, res.Stdout, res.Stderr)
+	}
+	res = itRun(t, j, r, "", "curl", "-sS", "-o", "/dev/null", "-w", "%{http_connect}", "https://example.com/")
+	if res.Exit == 0 || !strings.Contains(string(res.Stdout)+string(res.Stderr), "403") {
+		t.Fatalf("control: https://example.com/ was not refused (exit %d): %s%s", res.Exit, res.Stdout, res.Stderr)
+	}
+	var log bytes.Buffer
+	if err := j.EgressLog(ctx, EgressLogFilter{Project: r.Project, Worker: r.Worker}, &log); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(log.String(), `"handler":"connect","method":"CONNECT","host":"proxy.golang.org","port":443`) ||
+		!strings.Contains(log.String(), `"host":"example.com","port":443,"path":"","decision":"deny","code":"host"`) {
+		t.Fatalf("egress log: %s", log.String())
+	}
+}
