@@ -87,6 +87,7 @@ One HTTP/1.1 parser per listener, strict: header block at most 8 KiB, no request
 
 ## 6. How policies reach the service (Proposed)
 1. `policy set` validates (policy.md) and stores the file host-side, then runs a hardened seeding call (same technique as `seed-cache`) that writes `<P>.<W>.json` into `wj-egress-policy` by atomic rename. The file holds only `project`, `worker`, `network`, the policy id.
+   **Implemented differently in v2.1 part A:** the whole policy file is written (it holds no secret), and the service validates it with the jail's own `ParsePolicy`, so the loaded id is exactly the host's policy id (`docs/protocol.md` section 7).
 2. It signals the service (`docker kill -s HUP wj-egress`). The service re-reads every file with the same validator package, opens or closes listeners and creates the worker's socket directory.
 3. `docker exec wj-egress wj-egress status <P.W>` prints the loaded id. `policy set` waits for it (exit 5 on timeout). `Run` compares the loaded id with the stored one before every network-enabled call (`ErrEgressUnavailable` otherwise), so a stale service can neither widen nor silently narrow access.
 4. Removal: `deprovision` (or `policy rm`) removes the file; the listener and its cache namespace go on the next reload.

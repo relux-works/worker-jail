@@ -1,4 +1,5 @@
-// Command worker-jail is the CLI of the worker-jail protocol (docs/protocol.md) v2.0: policy and worktree seeding.
+// Command worker-jail is the CLI of the worker-jail protocol (docs/protocol.md) v2.1 part A: policy, worktree seeding
+// and the egress service for network mode modules.
 package main
 
 import (
@@ -44,9 +45,12 @@ commands:
   policy show P W [--json]
   policy template reviewer|developer|yolo-offline --project P --worker W [--write-scope P1,P2,...] [--go-modules MASK ...]
   policy rm P W
+  egress up | down | status
+  egress log [--project P] [--worker W] [--since D]
 
 policy exit codes: 0 ok, 1 invalid policy, 2 usage, 3 not found, 4 risk above --max-risk or not accepted,
-5 egress unavailable (network modes other than none arrive in v2.1; also from provision and run).
+5 egress unavailable: the generic modes (allowlist, denylist, all) arrive in a later v2.1 part, or the egress
+service did not confirm a modules policy (also from provision and run).
 `
 
 type usageError struct{ msg string }
@@ -96,7 +100,7 @@ func run(ctx context.Context, args []string, stdin *os.File, stdout, stderr io.W
 	f, ok := map[string]func(context.Context, []string) (int, error){
 		"doctor": c.doctor, "provision": c.provision, "run": c.run, "export": c.export,
 		"deprovision": c.deprovision, "seed-cache": c.seedCache, "seed-gomod": c.seedGoMod,
-		"usage": c.usage, "ls": c.ls, "kill": c.kill, "purge": c.purge,
+		"usage": c.usage, "ls": c.ls, "kill": c.kill, "purge": c.purge, "egress": c.egress,
 	}[cmd]
 	if !ok {
 		fmt.Fprintf(stderr, "worker-jail: unknown command %q\n", cmd)
@@ -513,6 +517,74 @@ func (c *cli) purge(ctx context.Context, args []string) (int, error) {
 	return 0, c.j.Purge(ctx, *project)
 }
 
+// egress operates the egress service (v2.1 part A): up, down, status, log.
+func (c *cli) egress(ctx context.Context, args []string) (int, error) {
+	if len(args) == 0 {
+		return 0, usageError{"egress needs up, down, status or log"}
+	}
+	f := newFlags("egress "+args[0], c.stderr)
+	switch args[0] {
+	case "up", "down", "status":
+		if err := f.parse(args[1:]); err != nil {
+			return 0, err
+		}
+		if f.NArg() != 0 {
+			return 0, usageError{"egress " + args[0] + " takes no arguments"}
+		}
+	case "log":
+	default:
+		return 0, usageError{fmt.Sprintf("unknown egress command %q", args[0])}
+	}
+	switch args[0] {
+	case "up":
+		if err := c.j.EgressUp(ctx); err != nil {
+			return 0, err
+		}
+		fmt.Fprintf(c.stdout, "%s up\n", jail.EgressContainer)
+		return 0, nil
+	case "down":
+		return 0, c.j.EgressDown(ctx)
+	case "status":
+		rep, err := c.j.EgressStatus(ctx)
+		if err != nil {
+			return 0, err
+		}
+		state := rep.State
+		if state == "" {
+			state = "absent"
+		}
+		fmt.Fprintf(c.stdout, "%s %s\n", jail.EgressContainer, state)
+		code := 0
+		if rep.State != "running" {
+			code = 5
+		}
+		for _, w := range rep.Workers {
+			st := "ok"
+			switch {
+			case w.Mode != jail.NetModules:
+				st, code = "not served (the generic modes arrive in a later v2.1 part)", 5
+			case w.Loaded == "":
+				st, code = "NOT LOADED", 5
+			case w.Loaded != w.Stored:
+				st, code = "STALE (loaded "+w.Loaded+")", 5
+			}
+			fmt.Fprintf(c.stdout, "%s.%s %s stored=%s %s\n", w.Project, w.Worker, w.Mode, w.Stored, st)
+		}
+		return code, nil
+	}
+	var lf jail.EgressLogFilter
+	f.StringVar(&lf.Project, "project", "", "only this project's lines")
+	f.StringVar(&lf.Worker, "worker", "", "only this worker's lines")
+	f.StringVar(&lf.Since, "since", "", "docker logs --since (a duration such as 1h, or a timestamp)")
+	if err := f.parse(args[1:]); err != nil {
+		return 0, err
+	}
+	if f.NArg() != 0 {
+		return 0, usageError{"egress log takes only flags"}
+	}
+	return 0, c.j.EgressLog(ctx, lf, c.stdout)
+}
+
 // reportPolicy maps the policy commands' errors to their exit codes; the rest are as for every command.
 func reportPolicy(stderr io.Writer, err error) int {
 	switch {
@@ -640,13 +712,20 @@ func policySet(ctx context.Context, j *jail.Jail, args []string, stdout, stderr 
 		return err
 	}
 	sp, err := j.SetPolicy(ctx, f.ref(), data, o)
+	if sp.EgressWarning != "" {
+		fmt.Fprintf(stderr, "warning: %s\n", sp.EgressWarning)
+	}
 	if err != nil {
 		return err
 	}
 	for _, w := range sp.Risk.Warnings {
 		fmt.Fprintf(stderr, "warning: %s\n", w)
 	}
-	fmt.Fprintf(stdout, "%s.%s id=%s risk=%s\n", sp.Policy.Project, sp.Policy.Worker, sp.Policy.ID(), sp.Risk.Level)
+	fmt.Fprintf(stdout, "%s.%s id=%s risk=%s", sp.Policy.Project, sp.Policy.Worker, sp.Policy.ID(), sp.Risk.Level)
+	if sp.Policy.Network.Mode == jail.NetModules {
+		fmt.Fprint(stdout, " egress=confirmed")
+	}
+	fmt.Fprintln(stdout)
 	return nil
 }
 

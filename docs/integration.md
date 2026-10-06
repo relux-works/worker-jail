@@ -1,4 +1,4 @@
-# worker-jail integration notes (v1 to v2.0)
+# worker-jail integration notes (v1 to v2.1 part A)
 
 Status: informative. For remote-worker-harness (rwh) and for the orchestrators who review worker patches.
 The rules are in [`protocol.md`](protocol.md); where this page and the protocol differ, the protocol wins.
@@ -24,8 +24,9 @@ binfmt: false                       # no foreign-architecture emulation
 Never add `mounts:` or `--ssh-agent`. Build the images and the CLI, then check:
 
 ```sh
-make image    # worker-jail/base:1 and worker-jail/go:1, built into the workers VM
-make build    # bin/worker-jail
+make image    # worker-jail/base:1 (base image v2, with socat), worker-jail/go:1 and worker-jail/egress:1, built into the workers VM
+make build    # bin/worker-jail and bin/wj-egress
+bin/worker-jail egress up    # v2.1: only if a worker will have a modules policy; idempotent
 bin/worker-jail doctor
 ```
 
@@ -37,12 +38,15 @@ ok   vm-shares only colima's read-only image cache is shared
 ok   image     worker-jail/base:1
 ```
 
+When a stored policy has a network mode other than `none`, doctor adds a fourth line, `ok   egress    wj-egress hardened (...)`.
+
 ## 2. Images
 
 | image | built from | use |
 | --- | --- | --- |
-| `worker-jail/base:1` | `images/base` | The default (`jail.DefaultImage`). Debian trixie-slim, git, uid 10001, no setuid bits. |
+| `worker-jail/base:1` | `images/base` | The default (`jail.DefaultImage`). Debian trixie-slim, git, uid 10001, no setuid bits. Base image v2 (v2.1) adds `socat`, the relay of `modules` calls; rebuild derived images so they inherit it. |
 | `worker-jail/go:1` | `images/go` | Reference Go-toolchain parent: base plus Go 1.25. |
+| `worker-jail/egress:1` | `images/egress` (context: the repository root) | v2.1: the egress service `wj-egress`. A static binary in an empty image; not a call image, never pass it as `--image`. |
 
 Rules for derived images (protocol 9.9): derive from `worker-jail/base:1`, declare no `VOLUME` (doctor refuses it), hold no secrets, and build into the workers VM only.
 rwh's `images/rwh-worker/Dockerfile` defaults to `ARG BASE=worker-jail/base:latest`, but the only tag is `:1`, so build it with:
@@ -53,6 +57,7 @@ docker --context colima-workers build --build-arg BASE=worker-jail/base:1 -t rwh
 
 Caches: `/cache/<name>` is the read-only volume `wj-cache.<project>.<name>`. When a project has a `gomod` cache, every call gets
 `GOMODCACHE=/cache/gomod GOPROXY=off GOTOOLCHAIN=local`. `GOFLAGS` is the image's choice (`worker-jail/go:1` sets none; rwh's image sets `-mod=mod`).
+v2.1: a call whose policy has `network.mode: modules` gets instead `GOPROXY=file:///cache/gomod/cache/download,http://127.0.0.1:3128/gomod GOMODCACHE=/work/home/go/pkg/mod GOSUMDB=sum.golang.org GOTOOLCHAIN=local`: the seeded cache first, then the egress service through the relay (protocol section 7).
 
 ## 3. Go API: one worker session
 
@@ -108,7 +113,7 @@ that survives the turn for `Export` and `Deprovision`, so an interrupted turn is
 | `ErrReviewRequired` | Flagged paths (CI, hooks, agent files, symlinks, gitlinks); CLI exit 4. | Read every flagged hunk; only then re-run with `--allow-review-required`, or reject. |
 | `ErrNoPolicy` | No stored policy for (P, W) (v2.0). Provision and Run refuse; nothing is created. | Ask the operator for a policy (`worker-jail policy set`); never write one from worker input. |
 | `ErrPolicyChanged` | The stored policy's id differs from the workspace's label, or the workspace predates v2.0. Run refuses. | Export, deprovision, provision again (re-provision adopts the new policy). |
-| `ErrEgressUnavailable` | The policy's `network.mode` is not `none`; egress arrives in v2.1. CLI exit 5. | Use `network.mode: none` until v2.1. |
+| `ErrEgressUnavailable` | A generic `network.mode` (`allowlist`, `denylist`, `all`; a later v2.1 part), or (v2.1) a `modules` policy the egress service does not serve: service down or never set up, not confirmed by `policy set`, or a stale id at `run`. CLI exit 5. | Generic modes: use `none` or `modules`. Otherwise `worker-jail egress status`, `egress up`, then `policy set` again. |
 | `ErrPolicyInvalid` | A policy breaks a rule; the message names the field and the rule. `policy` CLI exit 1. | Fix the file and review it like code. |
 | `ErrRiskExceeded` | `policy check --max-risk` exceeded, or `policy set` of CRITICAL without `--accept-risk CRITICAL` or HIGH without a `note`. CLI exit 4. | A decision for the operator, not the harness. |
 | `Result.TimedOut` | The call hit its timeout and was killed (CLI exit 124). | Report a timed-out tool call to the model. |
@@ -180,6 +185,34 @@ bin/worker-jail apply --repo ../myproj-story --allow-dirty --policy myproj.w1 --
   A conflict with your own dirty changes refuses the whole patch and leaves the tree as it was. The primary checkout is always refused.
 - Validate in a jail: `provision --from-worktree` of the same worktree under a verification worker, then `run` the tests.
 
+## 6b. v2.1: Go modules through the egress service
+
+A worker whose policy has `network.mode: modules` downloads the modules its `go_modules` masks allow, during its calls, through the egress
+service. The operator sets it up once; after that, nothing changes for the harness: the same `jail.Run`, the same `RunSpec`.
+
+```sh
+bin/worker-jail egress up                                              # once per VM; idempotent (starts a stopped service)
+bin/worker-jail policy template developer --project myproj --worker w1 --write-scope internal/,docs/ --go-modules 'golang\.org/x/.*' > w1.json
+bin/worker-jail policy check w1.json --max-risk MEDIUM
+bin/worker-jail policy set --project myproj --worker w1 w1.json        # myproj.w1 id=... risk=MEDIUM egress=confirmed
+bin/worker-jail provision --project myproj --worker w1 --from-worktree ../myproj-story
+bin/worker-jail run --project myproj --worker w1 -- go mod download    # through 127.0.0.1:3128 -> socat -> /run/wj/egress.sock
+bin/worker-jail egress log --project myproj --worker w1 --since 10m    # one JSON line per request: path, decision, code, bytes, cache
+```
+
+- `policy set` stores the file, writes it into the service's policy volume through a hardened call, signals the service (`SIGHUP`) and waits
+  up to 30 s for `wj-egress status` to print the stored id. Exit 5 (`ErrEgressUnavailable`) means "stored, not confirmed": fix the service
+  (`egress status`, `egress up`) and run `policy set` again.
+- `Run` asks the service before every call of a `modules` worker and refuses (`ErrEgressUnavailable`) unless it serves exactly the stored id:
+  a stopped service, a reload that did not happen, or a policy edited behind the jail's back never widens or silently narrows a worker.
+- A denied request is answered in-band, so `go` prints it: `403 Forbidden` with `X-Worker-Jail-Denied: module` (unlisted module), `grammar`,
+  `mode` (`CONNECT` or an absolute URI: the call has no general proxy), `method`, `rate` (the policy's `network.rate`), `size`, `guard`, or
+  `502` `upstream`. Widening `go_modules` is a reviewed policy change: export, deprovision, `policy set`, provision again.
+- The seeded `gomod` cache stays first in `GOPROXY`: what it holds never touches the network. Downloads land in `/work/home/go/pkg/mod`
+  (the workspace), and in the service's per-worker cache (at most 2 GiB per worker; nothing is shared between workers).
+- `policy rm` withdraws the policy from the service first (its socket and cache go); `deprovision` keeps the stored policy and its delivery.
+- A worker image must derive from base image v2 (it needs `socat`); otherwise a `modules` call exits 125 with a message naming the relay.
+
 ## 7. What rwh no longer does for jailed workers
 
 - No host-side file tools: read, write, edit and search all run as `rwh-tool` inside `jail.Run`.
@@ -195,6 +228,9 @@ bin/worker-jail apply --repo ../myproj-story --allow-dirty --policy myproj.w1 --
 | `worker-jail kill [--project P] [--worker W]` | Kill calls in flight; prints `killed N`. |
 | `worker-jail usage --project P --worker W` | Workspace bytes. |
 | `worker-jail purge --project P` | Kill P's calls and remove all of P's workspaces, caches and digests. |
+| `worker-jail egress up\|down` | v2.1: create (or start) and remove the egress service. `down` keeps its volumes (policies, caches) and network. |
+| `worker-jail egress status` | v2.1: the service's state and, per networked policy, stored and loaded ids (`ok`, `NOT LOADED`, `STALE`); exit 5 unless all are `ok`. |
+| `worker-jail egress log [--project P] [--worker W] [--since D]` | v2.1: the service's JSON log lines (`docker logs`), filtered. |
 
 - Dead sessions: `ls` shows workspaces no live session owns. `export -o` each one for the orchestrator, then `deprovision` (with `--force` only after the patch is handed over).
 - VM restart: volumes (workspaces, caches) survive; calls in flight die, and their turns show a failed call. Export as usual.
@@ -207,10 +243,13 @@ bin/worker-jail apply --repo ../myproj-story --allow-dirty --policy myproj.w1 --
 | `vm-shares` | a host share is mounted into the VM | remove `mounts:`, restart with `--mount none` |
 | `image` missing | image not built in the workers VM | `make image`, or build the derived image |
 | `image` declares VOLUME | derived image has `VOLUME` | remove it and rebuild |
+| `egress` missing | a stored policy has a network mode, but the service was never started | `worker-jail egress up` |
+| `egress` weakened (rootfs writable, capabilities, root, limits, log driver, network, mounts) | the container was not started by `egress up` | `worker-jail egress down && worker-jail egress up` |
 
 ## 9. Verification
 
 - `make it` (with `make image` first): the integration suite on the real VM, over throwaway `wjit-*` projects that it purges. It proves the
   provision, run, export, apply and deprovision path, timeouts, the output flood cap, that no container survives a call, and an offline Go build from a seeded cache.
 - `make image-redteam && make redteam`: the probes and positive controls of protocol section 12 (about 2 minutes, in the test-only image `worker-jail/redteam:1`); the report of the accepted run is `docs/redteam-report.md`, and every run writes `.temp/redteam/report.{md,json}`.
+- v2.1: `make redteam` also runs the egress probes E1, E2, E8 and E10 (`TestRedTeamEgress`; needs `egress up`, writes `.temp/redteam/egress-report.json`), and `make it` runs `go mod download` through the service (needs `egress up` and internet). The service's parser, grammar, dial guard, rate limits, cache isolation, redirect refusal and fail-closed loading are unit tests (`go test ./egress`), with fuzz targets `FuzzReadRequest` and `FuzzModulesPath` (`go test -fuzz FuzzReadRequest ./egress`).
 - rwh adds its own host-side probes on top (tool dispatch never leaves `jail.Run`, no secret in argv, stdin or environment).

@@ -67,7 +67,7 @@ var (
 	ErrPolicyInvalid     = errors.New("invalid policy")
 	ErrNoPolicy          = errors.New("no stored policy")
 	ErrPolicyChanged     = errors.New("stored policy differs from the workspace's")
-	ErrEgressUnavailable = errors.New("egress unavailable: network modes other than none arrive in v2.1")
+	ErrEgressUnavailable = errors.New("egress unavailable")
 	ErrRiskExceeded      = errors.New("policy risk above the accepted level")
 
 	ErrSnapshot    = errors.New("worktree cannot be snapshotted")

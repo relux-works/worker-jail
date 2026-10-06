@@ -55,7 +55,8 @@ func unescapeMount(s string) string {
 	return b.String()
 }
 
-// Doctor runs every check and fails with ErrDoctor if any fails.
+// Doctor runs every check and fails with ErrDoctor if any fails. The egress check runs only when a stored policy
+// has a network mode other than none.
 func (j *Jail) Doctor(ctx context.Context) (DoctorReport, error) {
 	var rep DoctorReport
 	add := func(name string, ok bool, detail string) { rep.Checks = append(rep.Checks, Check{name, ok, detail}) }
@@ -89,6 +90,19 @@ func (j *Jail) Doctor(ctx context.Context) (DoctorReport, error) {
 		add("image", false, fmt.Sprintf("image %s declares VOLUME %s", j.image, v))
 	default:
 		add("image", true, j.image)
+	}
+
+	if len(j.networkPolicies()) > 0 {
+		out, errb, exit, err = j.dockerOut(ctx, nil, "inspect", "--type", "container", "--format", "{{json .}}", EgressContainer)
+		switch {
+		case err != nil:
+			add("egress", false, "docker: "+err.Error())
+		case exit != 0:
+			add("egress", false, fmt.Sprintf("%s missing (run `worker-jail egress up`): %s", EgressContainer, errb))
+		default:
+			ok, d := checkEgressHardening(out)
+			add("egress", ok, d)
+		}
 	}
 
 	for _, c := range rep.Checks {

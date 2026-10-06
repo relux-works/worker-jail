@@ -237,3 +237,42 @@ func main() { var g errgroup.Group; g.Go(func() error { return nil }); _ = g.Wai
 		t.Fatalf("control: unseeded build succeeded offline: %s", res.Stdout)
 	}
 }
+
+// v2.1 part A: `go mod download` of a small public module through the egress service (VM and internet only; needs
+// `worker-jail egress up` and the base image v2 with socat). policy set confirms the id, the listed module downloads
+// through the relay and the service, the egress log names the worker; control: an unlisted module is refused.
+func TestIntegrationEgressModules(t *testing.T) {
+	j := itJail(t, "worker-jail/go:1")
+	ctx := context.Background()
+	if state, err := j.egressState(ctx); err != nil || state != "running" {
+		t.Fatalf("the egress service is not running (worker-jail egress up): %q %v", state, err)
+	}
+	r := Ref{itProject(t, j), "w1"}
+	t.Cleanup(func() {
+		if err := j.RemovePolicy(r); err != nil {
+			t.Errorf("withdraw %v: %v", r, err)
+		}
+	})
+	data := modulesPolicy(t, r.Project, r.Worker, `golang\.org/x/sync`)
+	if _, err := j.SetPolicy(ctx, r, data, SetPolicyOptions{}); err != nil {
+		t.Fatalf("policy set: %v", err)
+	}
+	if _, err := j.Provision(ctx, ProvisionSpec{Ref: r, Repo: newRepo(t)}); err != nil {
+		t.Fatal(err)
+	}
+	res := itRun(t, j, r, "", "go", "mod", "download", "-json", "golang.org/x/sync@v0.10.0")
+	if res.Exit != 0 || !strings.Contains(string(res.Stdout), `"Version": "v0.10.0"`) || !strings.Contains(string(res.Stdout), `"Zip": "/work/home/go/pkg/mod/`) {
+		t.Fatalf("download failed (exit %d): %s%s", res.Exit, res.Stdout, res.Stderr)
+	}
+	res = itRun(t, j, r, "", "go", "mod", "download", "-json", "golang.org/x/text@v0.14.0")
+	if res.Exit == 0 || !strings.Contains(string(res.Stdout)+string(res.Stderr), "403") {
+		t.Fatalf("control: unlisted module downloaded (exit %d): %s%s", res.Exit, res.Stdout, res.Stderr)
+	}
+	var log bytes.Buffer
+	if err := j.EgressLog(ctx, EgressLogFilter{Project: r.Project, Worker: r.Worker}, &log); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(log.String(), `"path":"/gomod/golang.org/x/sync/@v/v0.10.0.zip"`) || !strings.Contains(log.String(), `"code":"module"`) {
+		t.Fatalf("egress log: %s", log.String())
+	}
+}

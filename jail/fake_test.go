@@ -47,11 +47,27 @@ type fakeDocker struct {
 	pending   map[string]*fakeCall
 	kills     []string
 	nid       int
+
+	// The egress service (v2.1): loaded maps P.W to the id `wj-egress status` prints; statusExit, when set, is the
+	// exit of every `docker exec` (the service is down); onHUP runs on `docker kill -s HUP`, hupExit is its exit.
+	loaded     map[string]string
+	statusExit int
+	onHUP      func()
+	hupExit    int
+	hups       int
+	// replies answer the service's other verbs (network, run, rm, inspect, logs, start without -a); default exit 0.
+	replies map[string]fakeReply
+}
+
+type fakeReply struct {
+	out, err string
+	exit     int
 }
 
 func newFakeDocker() *fakeDocker {
 	return &fakeDocker{volumes: map[string]map[string]string{}, busy: map[string]bool{},
-		info: "colima-workers\toverlay2\t4", ncpu: "4", imageOut: "null", pending: map[string]*fakeCall{}}
+		info: "colima-workers\toverlay2\t4", ncpu: "4", imageOut: "null", pending: map[string]*fakeCall{},
+		loaded: map[string]string{}, replies: map[string]fakeReply{}}
 }
 
 type fakeColima struct {
@@ -128,6 +144,10 @@ func (f *fakeDocker) Run(ctx context.Context, args []string, stdin io.Reader, st
 		fmt.Fprintln(stdout, id)
 		return 0, nil
 	case "start":
+		if args[1] != "-a" {
+			defer f.mu.Unlock()
+			return f.reply(args, stdout, stderr), nil
+		}
 		c := f.pending[args[len(args)-1]]
 		c.stdin, c.stdout, c.stderr = stdin, stdout, stderr
 		f.starts = append(f.starts, c)
@@ -139,6 +159,19 @@ func (f *fakeDocker) Run(ctx context.Context, args []string, stdin io.Reader, st
 		}
 		return on(c), nil
 	case "kill":
+		if args[1] == "-s" {
+			f.hups++
+			on, exit := f.onHUP, f.hupExit
+			f.mu.Unlock()
+			if exit != 0 {
+				fmt.Fprintln(stderr, "Error response from daemon: container wj-egress is not running")
+				return exit, nil
+			}
+			if on != nil {
+				on()
+			}
+			return 0, nil
+		}
 		defer f.mu.Unlock()
 		for _, id := range args[1:] {
 			f.kills = append(f.kills, id)
@@ -155,9 +188,35 @@ func (f *fakeDocker) Run(ctx context.Context, args []string, stdin io.Reader, st
 		defer f.mu.Unlock()
 		fmt.Fprint(stdout, f.ps)
 		return 0, nil
+	case "exec":
+		defer f.mu.Unlock()
+		if f.statusExit != 0 {
+			fmt.Fprintln(stderr, "Error response from daemon: container wj-egress is not running")
+			return f.statusExit, nil
+		}
+		if id := f.loaded[args[len(args)-1]]; id != "" {
+			fmt.Fprintln(stdout, id)
+			return 0, nil
+		}
+		fmt.Fprintln(stdout, "none")
+		return 3, nil
+	case "network", "run", "rm", "inspect", "logs":
+		defer f.mu.Unlock()
+		return f.reply(args, stdout, stderr), nil
 	}
 	f.mu.Unlock()
 	return 1, fmt.Errorf("fake docker: unexpected %v", args)
+}
+
+// reply answers a service verb from replies, keyed by "verb sub" (network create, network inspect) or "verb".
+func (f *fakeDocker) reply(args []string, stdout, stderr io.Writer) int {
+	r, ok := f.replies[args[0]+" "+args[1]]
+	if !ok {
+		r = f.replies[args[0]]
+	}
+	fmt.Fprint(stdout, r.out)
+	fmt.Fprint(stderr, r.err)
+	return r.exit
 }
 
 func (f *fakeDocker) volume(args []string, stdout, stderr io.Writer) int {

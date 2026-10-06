@@ -4,6 +4,7 @@ WORKERS_DOCKER := DOCKER_HOST=unix://$(HOME)/.colima/workers/docker.sock
 
 build:
 	go build -o bin/worker-jail ./cmd/worker-jail
+	go build -o bin/wj-egress ./cmd/wj-egress
 
 test:
 	go test ./...
@@ -12,11 +13,12 @@ vet:
 	go vet ./...
 
 cover:
-	go test -cover ./jail
+	go test -cover ./jail ./egress
 
 image:
 	$(WORKERS_DOCKER) docker build -t worker-jail/base:1 images/base
 	$(WORKERS_DOCKER) docker build -t worker-jail/go:1 images/go
+	$(WORKERS_DOCKER) docker build -f images/egress/Dockerfile -t worker-jail/egress:1 .
 
 it:
 	WJ_IT=1 go test ./jail -run Integration -count=1 -v

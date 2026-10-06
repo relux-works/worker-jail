@@ -1,0 +1,5 @@
+# Context of images/egress (built from the repository root); the other images use their own directory.
+.git
+.temp
+.task-board
+bin

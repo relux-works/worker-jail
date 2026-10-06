@@ -237,3 +237,23 @@ func TestApplyAllowDirty(t *testing.T) {
 		t.Fatalf("unrelated change lost: %q", b)
 	}
 }
+
+// The egress commands' usage errors exit 2 before any docker call.
+func TestEgressUsage(t *testing.T) {
+	e := newEnv(t)
+	for _, c := range []struct {
+		args []string
+		msg  string
+	}{
+		{[]string{"egress"}, "up, down, status or log"},
+		{[]string{"egress", "restart"}, "unknown egress command"},
+		{[]string{"egress", "up", "now"}, "takes no arguments"},
+		{[]string{"egress", "status", "--json"}, "flag provided but not defined"},
+		{[]string{"egress", "log", "extra"}, "takes only flags"},
+		{[]string{"egress", "log", "--tail", "5"}, "flag provided but not defined"},
+	} {
+		if code, _, errb := e.run(c.args...); code != 2 || !strings.Contains(errb, c.msg) {
+			t.Errorf("%q: exit %d %s", c.args, code, errb)
+		}
+	}
+}
