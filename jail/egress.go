@@ -231,6 +231,47 @@ func (j *Jail) EgressLog(ctx context.Context, f EgressLogFilter, w io.Writer) er
 	return werr
 }
 
+// imageRelay returns the egress-relay label of j's image ("" when the image has none).
+func (j *Jail) imageRelay(ctx context.Context) (string, error) {
+	out, errb, exit, err := j.dockerOut(ctx, nil, "image", "inspect", "--format", "{{json .Config.Labels}}", j.image)
+	if err != nil {
+		return "", err
+	}
+	if exit != 0 {
+		return "", fmt.Errorf("jail: image %s missing (run `make image`): %s", j.image, errb)
+	}
+	labels := map[string]string{}
+	if s := strings.TrimSpace(out); s != "" && s != "null" {
+		if err := json.Unmarshal([]byte(s), &labels); err != nil {
+			return "", fmt.Errorf("jail: docker image inspect %s: %w", j.image, err)
+		}
+	}
+	return labels[LabelEgressRelay], nil
+}
+
+// checkImageRelay fails with ErrImageNoRelay unless j's image carries the egress relay (base image v2), which a call
+// under the network mode mode starts. Only a positive answer is cached, per image, for the Jail's lifetime.
+func (j *Jail) checkImageRelay(ctx context.Context, mode string) error {
+	j.relayMu.Lock()
+	defer j.relayMu.Unlock()
+	if j.relayOK[j.image] {
+		return nil
+	}
+	relay, err := j.imageRelay(ctx)
+	if err != nil {
+		return err
+	}
+	if relay != EgressRelaySocat {
+		return fmt.Errorf("%w: image %s lacks the label %s=%s that network mode %s needs; rebuild it FROM worker-jail/base:2",
+			ErrImageNoRelay, j.image, LabelEgressRelay, EgressRelaySocat, mode)
+	}
+	if j.relayOK == nil {
+		j.relayOK = map[string]bool{}
+	}
+	j.relayOK[j.image] = true
+	return nil
+}
+
 // networkPolicies returns the valid stored policies whose network mode is not none.
 func (j *Jail) networkPolicies() []Policy {
 	files, _ := filepath.Glob(filepath.Join(j.state, "policies", "*.json"))

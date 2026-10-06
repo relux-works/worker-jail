@@ -391,12 +391,12 @@ func TestDoctorEgress(t *testing.T) {
 
 	fd := egressFake(t)
 	j := newTestJail(t, fd)
-	if rep, err := j.Doctor(context.Background()); err != nil || len(rep.Checks) != 3 || fd.count("inspect") != 0 {
+	if rep, err := j.Doctor(context.Background()); err != nil || len(rep.Checks) != 4 || fd.count("inspect") != 0 {
 		t.Fatalf("no network policy: %+v %v", rep, err)
 	}
 	storePolicy(t, j, "p1", "w1", modulesPolicy(t, "p1", "w1"))
 	fd.replies["inspect"] = fakeReply{out: strings.Replace(hardenedEgress, `"ReadonlyRootfs":true`, `"ReadonlyRootfs":false`, 1)}
-	if rep, err := j.Doctor(context.Background()); !errors.Is(err, ErrDoctor) || len(rep.Checks) != 4 || !strings.Contains(err.Error(), "rootfs writable") {
+	if rep, err := j.Doctor(context.Background()); !errors.Is(err, ErrDoctor) || len(rep.Checks) != 5 || !strings.Contains(err.Error(), "rootfs writable") {
 		t.Fatalf("weak service: %+v %v", rep, err)
 	}
 	fd.replies["inspect"] = fakeReply{out: hardenedEgress}

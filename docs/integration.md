@@ -24,7 +24,7 @@ binfmt: false                       # no foreign-architecture emulation
 Never add `mounts:` or `--ssh-agent`. Build the images and the CLI, then check:
 
 ```sh
-make image    # worker-jail/base:1 (base image v2, with socat), worker-jail/go:1 and worker-jail/egress:1, built into the workers VM
+make image    # worker-jail/base:2 (base image v2, with socat), worker-jail/go:2 and worker-jail/egress:1, built into the workers VM
 make build    # bin/worker-jail and bin/wj-egress
 bin/worker-jail egress up    # v2.1: only if a worker will have a network mode other than none; idempotent
 bin/worker-jail doctor
@@ -35,28 +35,29 @@ Expected output (exit 0):
 ```
 ok   endpoint  colima-workers, overlay2
 ok   vm-shares only colima's read-only image cache is shared
-ok   image     worker-jail/base:1
+ok   image     worker-jail/base:2
+ok   relay     image worker-jail/base:2 carries the egress relay (socat)
 ```
 
-When a stored policy has a network mode other than `none`, doctor adds a fourth line, `ok   egress    wj-egress hardened (...)`.
+The `relay` line reports whether the image carries the label `ai.relux.worker-jail.egress-relay=socat`; it is informational and fails only when a stored policy has a network mode other than `none`. In that case doctor also adds a fifth line, `ok   egress    wj-egress hardened (...)`.
 
 ## 2. Images
 
 | image | built from | use |
 | --- | --- | --- |
-| `worker-jail/base:1` | `images/base` | The default (`jail.DefaultImage`). Debian trixie-slim, git, uid 10001, no setuid bits. Base image v2 (v2.1) adds `socat`, the relay of every call with egress; rebuild derived images so they inherit it. |
-| `worker-jail/go:1` | `images/go` | Reference Go-toolchain parent: base plus Go 1.25. |
+| `worker-jail/base:2` | `images/base` | The default (`jail.DefaultImage`). Debian trixie-slim, git, uid 10001, no setuid bits. Base image v2 (v2.1): adds `socat`, the relay of every call with egress, and the labels `ai.relux.worker-jail.base-image=2` and `ai.relux.worker-jail.egress-relay=socat`, which derived images inherit. `:1` carries no labels and, depending on when it was built, may lack `socat`; the jail treats it as having no relay. |
+| `worker-jail/go:2` | `images/go` | Reference Go-toolchain parent: base:2 plus Go 1.25. |
 | `worker-jail/egress:1` | `images/egress` (context: the repository root) | v2.1: the egress service `wj-egress`. A static binary in an empty image; not a call image, never pass it as `--image`. |
 
-Rules for derived images (protocol 9.9): derive from `worker-jail/base:1`, declare no `VOLUME` (doctor refuses it), hold no secrets, and build into the workers VM only.
-rwh's `images/rwh-worker/Dockerfile` defaults to `ARG BASE=worker-jail/base:latest`, but the only tag is `:1`, so build it with:
+Rules for derived images (protocol 9.9): derive from `worker-jail/base:2` (a worker whose policy has a network mode other than `none` needs it: `provision` and `run` refuse an image without the egress-relay label, `ErrImageNoRelay`), declare no `VOLUME` (doctor refuses it), hold no secrets, and build into the workers VM only.
+rwh's `images/rwh-worker/Dockerfile` defaults to `ARG BASE=worker-jail/base:latest`, but the tags are `:1` (v1) and `:2` (v2), so build it with:
 
 ```sh
-docker --context colima-workers build --build-arg BASE=worker-jail/base:1 -t rwh-worker:dev images/rwh-worker
+docker --context colima-workers build --build-arg BASE=worker-jail/base:2 -t rwh-worker:dev images/rwh-worker
 ```
 
 Caches: `/cache/<name>` is the read-only volume `wj-cache.<project>.<name>`. When a project has a `gomod` cache, every call gets
-`GOMODCACHE=/cache/gomod GOPROXY=off GOTOOLCHAIN=local`. `GOFLAGS` is the image's choice (`worker-jail/go:1` sets none; rwh's image sets `-mod=mod`).
+`GOMODCACHE=/cache/gomod GOPROXY=off GOTOOLCHAIN=local`. `GOFLAGS` is the image's choice (`worker-jail/go:2` sets none; rwh's image sets `-mod=mod`).
 v2.1: a call whose policy has `network.mode: modules` gets instead `GOPROXY=file:///cache/gomod/cache/download,http://127.0.0.1:3128/gomod GOMODCACHE=/work/home/go/pkg/mod GOSUMDB=sum.golang.org GOTOOLCHAIN=local`: the seeded cache first, then the egress service through the relay (protocol section 7).
 A call whose policy has `network.mode` `allowlist`, `denylist` or `all` keeps the `gomod` cache's environment (Go stays offline from the cache)
 and adds `HTTP_PROXY=HTTPS_PROXY=ALL_PROXY=http://127.0.0.1:3128` and an empty `NO_PROXY` (section 6c).
@@ -149,8 +150,8 @@ On exit 5 `apply` lists the paths outside the write scope and applies nothing; t
 6. Validate in a jail, never on the host:
 
 ```sh
-bin/worker-jail --image worker-jail/go:1 provision --project myproj --worker verify-w-7f3a --repo .temp/review-w-7f3a --ref worker/w-7f3a-turn-3
-bin/worker-jail --image worker-jail/go:1 run --project myproj --worker verify-w-7f3a --timeout 10m -- go test ./...
+bin/worker-jail --image worker-jail/go:2 provision --project myproj --worker verify-w-7f3a --repo .temp/review-w-7f3a --ref worker/w-7f3a-turn-3
+bin/worker-jail --image worker-jail/go:2 run --project myproj --worker verify-w-7f3a --timeout 10m -- go test ./...
 bin/worker-jail deprovision --project myproj --worker verify-w-7f3a
 ```
 
@@ -213,7 +214,7 @@ bin/worker-jail egress log --project myproj --worker w1 --since 10m    # one JSO
 - The seeded `gomod` cache stays first in `GOPROXY`: what it holds never touches the network. Downloads land in `/work/home/go/pkg/mod`
   (the workspace), and in the service's per-worker cache (at most 2 GiB per worker; nothing is shared between workers).
 - `policy rm` withdraws the policy from the service first (its socket and cache go); `deprovision` keeps the stored policy and its delivery.
-- A worker image must derive from base image v2 (it needs `socat`); otherwise a `modules` call exits 125 with a message naming the relay.
+- A worker image must derive from `worker-jail/base:2` (base image v2: `socat` and the label `ai.relux.worker-jail.egress-relay=socat`); otherwise `provision` and `run` refuse before creating anything (`ErrImageNoRelay`, naming the image), and `doctor` fails its `relay` check.
 
 ## 6c. v2.1: hosts through the egress service (allowlist, denylist, all)
 
@@ -290,6 +291,6 @@ bin/worker-jail egress log --project myproj --worker w2 --since 10m    # host, p
 
 - `make it` (with `make image` first): the integration suite on the real VM, over throwaway `wjit-*` projects that it purges. It proves the
   provision, run, export, apply and deprovision path, timeouts, the output flood cap, that no container survives a call, and an offline Go build from a seeded cache.
-- `make image-redteam && make redteam`: the probes and positive controls of protocol section 12 (about 2 minutes, in the test-only image `worker-jail/redteam:1`); the report of the accepted run is `docs/redteam-report.md`, and every run writes `.temp/redteam/report.{md,json}`.
+- `make image-redteam && make redteam`: the probes and positive controls of protocol section 12 (about 2 minutes, in the test-only image `worker-jail/redteam:2`); the report of the accepted run is `docs/redteam-report.md`, and every run writes `.temp/redteam/report.{md,json}`.
 - v2.1: `make redteam` also runs the egress probes E1, E2, E2-generic, E5 (allowlist anchoring against the real service), E8 and E10 (`TestRedTeamEgress`; needs `egress up`, writes `.temp/redteam/egress-report.json`), and `make it` runs `go mod download` and, under an allowlist of `proxy.golang.org:443`, `curl https://proxy.golang.org/` (and a refused `https://example.com/`) through the service (needs `egress up` and internet). The service's parser, grammar, dial guard, rate limits, cache isolation, redirect refusal and fail-closed loading are unit tests (`go test ./egress`), and so are the generic modes' forms, host masks, ports, deny-wins, header stripping, `Host` check, byte and tunnel caps and log fields; the fuzz targets are `FuzzReadRequest`, `FuzzModulesPath` and `FuzzParseAuthority` (`go test -fuzz FuzzParseAuthority ./egress`).
 - rwh adds its own host-side probes on top (tool dispatch never leaves `jail.Run`, no secret in argv, stdin or environment).

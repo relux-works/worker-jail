@@ -20,14 +20,14 @@ import (
 	"time"
 )
 
-// The red-team suite (docs/protocol.md section 12). WJ_REDTEAM=1, image worker-jail/redteam:1 (`make image-redteam`).
+// The red-team suite (docs/protocol.md section 12). WJ_REDTEAM=1, image worker-jail/redteam:2 (`make image-redteam`).
 // Every probe runs jailed (through Jail.Run, as uid 10001, default hardening: the attack must fail) and as a
 // positive control (the same probe in a container that lacks only the blocking layer(s): the attack must succeed).
 // Weakened containers are built here only, by transforming createArgs' argv; nothing weakened is reachable from
 // the exported API or the CLI. Projects are named wjrt-*, extra volumes and containers carry the label wjrt=1.
 
 const (
-	rtImage  = "worker-jail/redteam:1"
+	rtImage  = "worker-jail/redteam:2"
 	rtCanary = "wjrt-canary"
 	rtLabel  = "wjrt=1"
 )

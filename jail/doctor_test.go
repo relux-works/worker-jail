@@ -39,7 +39,7 @@ func TestDoctor(t *testing.T) {
 	fd := newFakeDocker()
 	j := newTestJail(t, fd)
 	rep, err := j.Doctor(context.Background())
-	if err != nil || len(rep.Checks) != 3 {
+	if err != nil || len(rep.Checks) != 4 {
 		t.Fatalf("control: %v %+v", err, rep)
 	}
 	cases := map[string]func(*fakeDocker, *Jail){
@@ -54,7 +54,7 @@ func TestDoctor(t *testing.T) {
 		j := newTestJail(t, fd)
 		br(fd, j)
 		rep, err := j.Doctor(context.Background())
-		if !errors.Is(err, ErrDoctor) || len(rep.Checks) != 3 {
+		if !errors.Is(err, ErrDoctor) || len(rep.Checks) != 4 {
 			t.Errorf("%s: err %v checks %d", name, err, len(rep.Checks))
 		}
 		if name == "image missing" && !strings.Contains(err.Error(), "make image") {

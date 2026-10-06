@@ -67,8 +67,9 @@ func resolveBase(ctx context.Context, repo, refName string) (base, fullref strin
 // Provision creates and clones a workspace, or returns the existing one.
 // It refuses without a stored policy, and refuses a stored HIGH policy without a note (the store holds only what
 // SetPolicy's risk gates passed, unless a file was placed by hand). A policy with egress provisions like none: the
-// clone needs no network, and doctor checks the egress service. A new workspace is labelled with the policy's id and
-// risk. A secret-guard override is refused for a HIGH or CRITICAL policy.
+// clone needs no network, and doctor checks the egress service; but the image must carry the egress relay
+// (ErrImageNoRelay, before any volume exists). A new workspace is labelled with the policy's id and risk. A
+// secret-guard override is refused for a HIGH or CRITICAL policy.
 // With FromWorktree the base is a snapshot commit of the worktree's current state (snapshot.go); the
 // worktree is never written, and the workspace is also labelled with the snapshot tree and parent.
 func (j *Jail) Provision(ctx context.Context, s ProvisionSpec) (Workspace, error) {
@@ -97,7 +98,12 @@ func (j *Jail) Provision(ctx context.Context, s ProvisionSpec) (Workspace, error
 		return ws, err
 	}
 	defer unlock()
-	if _, err := j.Doctor(ctx); err != nil {
+	if pol.Network.Mode != NetNone {
+		if err := j.checkImageRelay(ctx, pol.Network.Mode); err != nil {
+			return ws, err
+		}
+	}
+	if _, err := j.doctor(ctx, pol.Network.Mode != NetNone); err != nil {
 		return ws, err
 	}
 	labels, ok, err := j.volumeLabels(ctx, ws.Volume)

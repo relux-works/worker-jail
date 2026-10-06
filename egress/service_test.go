@@ -552,7 +552,14 @@ func TestCacheCaps(t *testing.T) {
 	if n := e.up.hit("/proxy/golang.org/x/text/@v/v0.14.0.info"); n != 2 {
 		t.Fatalf("info over the total cap was cached: %d hits", n)
 	}
-	if ents, _ := os.ReadDir(filepath.Join(e.cache, "p.w", "tmp")); len(ents) != 0 {
+	// The spool file is removed after the response is written, so the client can finish first: wait (bounded).
+	var ents []os.DirEntry
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if ents, _ = os.ReadDir(filepath.Join(e.cache, "p.w", "tmp")); len(ents) == 0 || time.Now().After(deadline) {
+			break
+		}
+	}
+	if len(ents) != 0 {
 		t.Fatalf("spool files left: %v", ents)
 	}
 }

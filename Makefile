@@ -16,8 +16,8 @@ cover:
 	go test -cover ./jail ./egress
 
 image:
-	$(WORKERS_DOCKER) docker build -t worker-jail/base:1 images/base
-	$(WORKERS_DOCKER) docker build -t worker-jail/go:1 images/go
+	$(WORKERS_DOCKER) docker build -t worker-jail/base:2 images/base
+	$(WORKERS_DOCKER) docker build -t worker-jail/go:2 images/go
 	$(WORKERS_DOCKER) docker build -f images/egress/Dockerfile -t worker-jail/egress:1 .
 
 it:
@@ -25,7 +25,7 @@ it:
 
 # Test-only adversarial image; never use it for real workers.
 image-redteam:
-	$(WORKERS_DOCKER) docker build -t worker-jail/redteam:1 images/redteam
+	$(WORKERS_DOCKER) docker build -t worker-jail/redteam:2 images/redteam
 
 redteam:
 	WJ_REDTEAM=1 go test ./jail -run RedTeam -count=1 -v -timeout 30m

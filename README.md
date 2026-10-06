@@ -63,7 +63,7 @@ from base image v2 bridges the call's `127.0.0.1:3128` to the socket; the jail s
 `policy set` delivers the policy to the service and waits for it to confirm the id; `run` refuses unless the service serves exactly the stored id.
 
 ```sh
-make image                    # base image v2 (socat), worker-jail/go:1 and worker-jail/egress:1, built into the workers VM
+make image                    # worker-jail/base:2 (base image v2, socat), worker-jail/go:2 and worker-jail/egress:1, built into the workers VM
 bin/worker-jail egress up     # network wj-egress-net, the volumes wj-egress-{sock,policy,cache}, the hardened service
 bin/worker-jail policy set --project myproj --worker w1 w1.json     # prints ... egress=confirmed; exit 5 if not confirmed
 bin/worker-jail run --project myproj --worker w1 -- go mod download
@@ -107,9 +107,9 @@ Go for tooling; tests with the go-testing-tools skill, including a red-team suit
 | `colima` | `doctor` reads the VM's `/proc/mounts` via `colima ssh -p workers` | `bin/worker-jail doctor` | none |
 | `git` (host) | provision bundles, worktree snapshots (temporary repository, empty config), `apply` (hooks disabled), `seed-gomod` archives | via the CLI | none |
 | `wj-egress` | the egress service (v2.1, every network mode but `none`): `serve --sockroot D --policydir D --cachedir D`, `status P.W` (prints the loaded policy id or `none`, exit 0 or 3) | inside the container `wj-egress`, started by `worker-jail egress up`; `docker exec wj-egress wj-egress status P.W` | JSON log lines on its stdout (`worker-jail egress log`) |
-| images | `worker-jail/base:1` (`images/base`, base image v2: adds `socat`), `worker-jail/go:1` (`images/go`), `worker-jail/egress:1` (`images/egress`, built from the repository root) | `make image` (builds into the workers VM) | images in the workers VM |
+| images | `worker-jail/base:2` (`images/base`, base image v2: adds `socat` and the labels `ai.relux.worker-jail.base-image=2`, `ai.relux.worker-jail.egress-relay=socat`), `worker-jail/go:2` (`images/go`), `worker-jail/egress:1` (`images/egress`, built from the repository root) | `make image` (builds into the workers VM) | images in the workers VM |
 | integration tests | the real VM path: provision, run, export, apply, deprovision, timeout, flood, no survivors, offline Go build, and (v2.1) `go mod download` and an allowlisted `curl https://proxy.golang.org/` through the egress service (need `egress up` and internet) | `make image && make it` (sets `WJ_IT=1`) | test projects `wjit-*`, purged at the end |
 
-Exit codes of `worker-jail`: `run` exits with the call's status (124 on timeout); usage errors 2; jail errors 3 (including no stored policy, a changed policy, and the worktree refusals `ErrSnapshot`, `ErrSecret`, `ErrSeed`, `ErrDirtyTarget`);
+Exit codes of `worker-jail`: `run` exits with the call's status (124 on timeout); usage errors 2; jail errors 3 (including no stored policy, a changed policy, an image without the egress relay `ErrImageNoRelay`, and the worktree refusals `ErrSnapshot`, `ErrSecret`, `ErrSeed`, `ErrDirtyTarget`);
 `apply` refused for review 4; `apply --write-scope P1,P2,...` or `apply --policy P.W` refused for a path outside the write scope 5; egress unavailable 5 (a policy with egress whose id the egress service does not serve); `egress status` 5 unless the service runs and serves every networked policy's stored id.
 `policy` commands: 0 ok, 1 invalid policy, 2 usage, 3 not found, 4 risk above `--max-risk` or not accepted, 5 egress unavailable or not confirmed.

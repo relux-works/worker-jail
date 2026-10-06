@@ -13,7 +13,8 @@ import (
 // It re-reads the stored policy and fails closed before any container starts if the policy is gone or differs
 // from the one the workspace was provisioned under; then it applies the policy's access and limits.
 // For a network mode other than none it also fails closed (ErrEgressUnavailable) unless the egress service serves
-// exactly the stored policy, and the call gets the worker's socket (read-only), the mode's env and the relay.
+// exactly the stored policy, and (ErrImageNoRelay) unless the image carries the relay; the call then gets the
+// worker's socket (read-only), the mode's env and the relay.
 func (j *Jail) Run(ctx context.Context, r Ref, s RunSpec) (Result, error) {
 	if err := r.validate(); err != nil {
 		return Result{}, err
@@ -63,6 +64,9 @@ func (j *Jail) Run(ctx context.Context, r Ref, s RunSpec) (Result, error) {
 	egress := ""
 	if pol.Network.Mode != NetNone {
 		egress = pol.Network.Mode
+		if err := j.checkImageRelay(ctx, egress); err != nil {
+			return Result{}, err
+		}
 		if err := j.checkEgressLoaded(ctx, r, pol); err != nil {
 			return Result{}, err
 		}

@@ -1,7 +1,7 @@
-# worker-jail/redteam:1 — TEST-ONLY adversarial image for the red-team suite (docs/protocol.md section 12).
+# worker-jail/redteam:2 — TEST-ONLY adversarial image for the red-team suite (docs/protocol.md section 12).
 # It deliberately ships sudo (NOPASSWD for worker), a setuid-root binary and network tools, so the suite
 # can prove that the jail's runtime flags make them useless. Never use this image for real workers.
-FROM worker-jail/base:1
+FROM worker-jail/base:2
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl netcat-openbsd iproute2 libcap2-bin sudo \
  && rm -rf /var/lib/apt/lists/* \

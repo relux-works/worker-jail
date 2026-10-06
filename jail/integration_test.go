@@ -199,7 +199,7 @@ func TestIntegrationNoSurvivor(t *testing.T) {
 
 // A seeded gomod cache makes an offline Go build and test pass; control: without the seed it fails.
 func TestIntegrationGoOffline(t *testing.T) {
-	j := itJail(t, "worker-jail/go:1")
+	j := itJail(t, "worker-jail/go:2")
 	ctx := context.Background()
 	repo := newRepo(t)
 	writeFile(t, filepath.Join(repo, "go.mod"), "module example.com/m\n\ngo 1.25\n")
@@ -242,7 +242,7 @@ func main() { var g errgroup.Group; g.Go(func() error { return nil }); _ = g.Wai
 // `worker-jail egress up` and the base image v2 with socat). policy set confirms the id, the listed module downloads
 // through the relay and the service, the egress log names the worker; control: an unlisted module is refused.
 func TestIntegrationEgressModules(t *testing.T) {
-	j := itJail(t, "worker-jail/go:1")
+	j := itJail(t, "worker-jail/go:2")
 	ctx := context.Background()
 	if state, err := j.egressState(ctx); err != nil || state != "running" {
 		t.Fatalf("the egress service is not running (worker-jail egress up): %q %v", state, err)

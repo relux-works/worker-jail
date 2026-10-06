@@ -34,6 +34,11 @@ const (
 	// the snapshot's tree and the worktree's HEAD at snapshot time. The base label is the snapshot commit.
 	LabelSnapshotTree   = LabelRoot + ".snapshot-tree"
 	LabelSnapshotParent = LabelRoot + ".snapshot-parent"
+	// LabelImageBase and LabelEgressRelay are image labels of base image v2, inherited by derived images: the base
+	// image's version and the relay a call with egress starts.
+	LabelImageBase   = LabelRoot + ".base-image"
+	LabelEgressRelay = LabelRoot + ".egress-relay"
+	EgressRelaySocat = "socat"
 
 	KindWorkspace = "workspace"
 	KindCache     = "cache"
@@ -42,7 +47,7 @@ const (
 
 // Defaults and protocol maximums.
 const (
-	DefaultImage     = "worker-jail/base:1"
+	DefaultImage     = "worker-jail/base:2"
 	DefaultTimeout   = 10 * time.Minute
 	MaxTimeout       = 60 * time.Minute
 	DefaultMaxOutput = 4 << 20
@@ -69,6 +74,7 @@ var (
 	ErrPolicyChanged     = errors.New("stored policy differs from the workspace's")
 	ErrEgressUnavailable = errors.New("egress unavailable")
 	ErrRiskExceeded      = errors.New("policy risk above the accepted level")
+	ErrImageNoRelay      = errors.New("image has no egress relay")
 
 	ErrSnapshot    = errors.New("worktree cannot be snapshotted")
 	ErrSecret      = errors.New("secret guard: the snapshot holds likely secrets")
@@ -89,7 +95,7 @@ var DefaultLimits = Limits{CPUs: 2, Memory: 2 << 30, Tmp: 512 << 20, FileSize: 2
 
 // Config configures a Jail.
 type Config struct {
-	Image        string // default worker-jail/base:1
+	Image        string // default worker-jail/base:2
 	StateDir     string // default ~/.local/state/worker-jail
 	Slots        int    // 0: VM CPU count
 	ProjectSlots int    // 0: ceil(Slots/2)
@@ -106,6 +112,9 @@ type Jail struct {
 	limits Limits
 	docker Docker
 	colima Colima
+
+	relayMu sync.Mutex
+	relayOK map[string]bool // images found to carry the egress-relay label, for the Jail's lifetime
 
 	slotMu       sync.Mutex
 	slots        int

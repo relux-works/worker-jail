@@ -55,9 +55,17 @@ func unescapeMount(s string) string {
 	return b.String()
 }
 
-// Doctor runs every check and fails with ErrDoctor if any fails. The egress check runs only when a stored policy
-// has a network mode other than none.
+// Doctor runs every check and fails with ErrDoctor if any fails. The relay check reports whether the image
+// carries the egress relay and fails only when a stored policy has a network mode other than none; the egress check
+// runs only then. This is the operator's view of the whole state dir.
 func (j *Jail) Doctor(ctx context.Context) (DoctorReport, error) {
+	return j.doctor(ctx, len(j.networkPolicies()) > 0)
+}
+
+// doctor runs the checks; the relay and egress checks must pass only when needEgress. Provision passes whether the
+// worker it provisions needs egress, so one worker's egress policy never blocks an offline worker on an older image
+// or while the egress service is down.
+func (j *Jail) doctor(ctx context.Context, needEgress bool) (DoctorReport, error) {
 	var rep DoctorReport
 	add := func(name string, ok bool, detail string) { rep.Checks = append(rep.Checks, Check{name, ok, detail}) }
 
@@ -92,7 +100,17 @@ func (j *Jail) Doctor(ctx context.Context) (DoctorReport, error) {
 		add("image", true, j.image)
 	}
 
-	if len(j.networkPolicies()) > 0 {
+	switch relay, err := j.imageRelay(ctx); {
+	case err != nil:
+		add("relay", !needEgress, err.Error())
+	case relay != EgressRelaySocat:
+		add("relay", !needEgress, fmt.Sprintf("image %s lacks the label %s=%s (offline workers only); rebuild it FROM worker-jail/base:2 for egress",
+			j.image, LabelEgressRelay, EgressRelaySocat))
+	default:
+		add("relay", true, fmt.Sprintf("image %s carries the egress relay (%s)", j.image, relay))
+	}
+
+	if needEgress {
 		out, errb, exit, err = j.dockerOut(ctx, nil, "inspect", "--type", "container", "--format", "{{json .}}", EgressContainer)
 		switch {
 		case err != nil:

@@ -32,21 +32,22 @@ func (c *fakeCall) argv() []string {
 
 // fakeDocker is a recording, stateful stand-in for the docker CLI.
 type fakeDocker struct {
-	mu        sync.Mutex
-	calls     [][]string
-	volumes   map[string]map[string]string
-	busy      map[string]bool
-	info      string
-	ncpu      string
-	imageOut  string
-	imageExit int
-	createErr string
-	ps        string
-	onStart   func(c *fakeCall) int
-	starts    []*fakeCall
-	pending   map[string]*fakeCall
-	kills     []string
-	nid       int
+	mu          sync.Mutex
+	calls       [][]string
+	volumes     map[string]map[string]string
+	busy        map[string]bool
+	info        string
+	ncpu        string
+	imageOut    string
+	imageExit   int
+	imageLabels string // `image inspect` of .Config.Labels; default baseV2Labels
+	createErr   string
+	ps          string
+	onStart     func(c *fakeCall) int
+	starts      []*fakeCall
+	pending     map[string]*fakeCall
+	kills       []string
+	nid         int
 
 	// The egress service (v2.1): loaded maps P.W to the id `wj-egress status` prints; statusExit, when set, is the
 	// exit of every `docker exec` (the service is down); onHUP runs on `docker kill -s HUP`, hupExit is its exit.
@@ -64,9 +65,12 @@ type fakeReply struct {
 	exit     int
 }
 
+// baseV2Labels are the labels of base image v2, inherited by every image derived from it.
+const baseV2Labels = `{"ai.relux.worker-jail.base-image":"2","ai.relux.worker-jail.egress-relay":"socat"}`
+
 func newFakeDocker() *fakeDocker {
 	return &fakeDocker{volumes: map[string]map[string]string{}, busy: map[string]bool{},
-		info: "colima-workers\toverlay2\t4", ncpu: "4", imageOut: "null", pending: map[string]*fakeCall{},
+		info: "colima-workers\toverlay2\t4", ncpu: "4", imageOut: "null", imageLabels: baseV2Labels, pending: map[string]*fakeCall{},
 		loaded: map[string]string{}, replies: map[string]fakeReply{}}
 }
 
@@ -126,6 +130,10 @@ func (f *fakeDocker) Run(ctx context.Context, args []string, stdin io.Reader, st
 		if f.imageExit != 0 {
 			fmt.Fprintln(stderr, "Error: No such image")
 			return f.imageExit, nil
+		}
+		if strings.Contains(strings.Join(args, " "), ".Config.Labels") {
+			fmt.Fprintln(stdout, f.imageLabels)
+			return 0, nil
 		}
 		fmt.Fprintln(stdout, f.imageOut)
 		return 0, nil

@@ -285,7 +285,7 @@ ask fronted 'GET http://proxy.golang.org:443/ HTTP/1.1\r\nHost: example.com\r\n\
 			row.Layers = []string{"Run compares the loaded id with the stored one", "invalid files close the listener"}
 		}},
 		{id: "E10-offline", tries: "go build of a module from the seeded cache with the relay killed inside the call", run: func(e *rtEnv, row *rtRow) {
-			gj, err := New(Config{StateDir: e.j.state, Image: "worker-jail/go:1"})
+			gj, err := New(Config{StateDir: e.j.state, Image: "worker-jail/go:2"})
 			if err != nil {
 				e.t.Fatal(err)
 			}

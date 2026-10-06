@@ -1,7 +1,9 @@
-# worker-jail/base:1 — the base image of every jailed call (docs/protocol.md). Base image v2 (v2.1): adds socat,
-# the relay a call of a policy with egress (any network.mode but none) starts to its egress socket. The tag stays :1; rebuild it.
+# worker-jail/base:2 — the base image of every jailed call (docs/protocol.md), base image v2 (v2.1): adds socat,
+# the relay a call of a policy with egress (any network.mode but none) starts to its egress socket. The labels are
+# inherited by derived images; provision, run and doctor check the egress-relay label for a policy with egress.
 # No VOLUME, no USER, no ENTRYPOINT: the jail sets the user and mounts.
 FROM debian:trixie-slim
+LABEL ai.relux.worker-jail.base-image=2 ai.relux.worker-jail.egress-relay=socat
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates coreutils findutils procps tar make socat \
  && rm -rf /var/lib/apt/lists/*
