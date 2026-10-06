@@ -207,7 +207,8 @@ func (f *fakeDocker) volume(args []string, stdout, stderr io.Writer) int {
 			case cacheNameFormat:
 				fmt.Fprintln(stdout, l[LabelCache])
 			case volumeFormat:
-				fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", n, l[LabelKind], l[LabelProject], l[LabelWorker], l[LabelCache], l[LabelBase], l[LabelCreated])
+				fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", n, l[LabelKind], l[LabelProject], l[LabelWorker], l[LabelCache],
+					l[LabelBase], l[LabelCreated], l[LabelSnapshotTree], l[LabelSnapshotParent])
 			}
 		}
 	}

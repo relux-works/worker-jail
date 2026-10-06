@@ -59,6 +59,8 @@ type rtEnv struct {
 	a, b   Ref
 	other  Ref    // workspace in project p2
 	patchH []byte // export of the planted-hooks worker, reused by G8-hooks-apply
+	wtRepo string // repo whose linked Story worktrees the snapshot probes provision from and apply into
+	patchS []byte // export of the worker provisioned from a dirty worktree, reused by G8-dirty-*
 }
 
 // argMod transforms a container argv (test-only weakening).
@@ -308,6 +310,7 @@ func TestRedTeam(t *testing.T) {
 		"sh", "-c", strings.Join(mk, " && ")+" && chmod -R a+rX /c"); exit != 0 {
 		t.Fatal(out)
 	}
+	e.wtRepo = rtStoryRepo(t)
 	e.a = e.provision(Ref{e.p, "w-a"})
 	e.b = e.provision(Ref{e.p, "w-b"})
 	e.other = e.provision(Ref{e.p2, "w-o"})
@@ -359,7 +362,7 @@ func canaryRead(id string) rtProbe {
 
 func rtProbes() []rtProbe {
 	wrote := func(out string, _ int) bool { return strings.Contains(out, "WROTE") }
-	return []rtProbe{
+	return append([]rtProbe{
 		canaryRead("G1-read-ssh"),
 		canaryRead("G1-read-config"),
 		canaryRead("G1-read-keychain"),
@@ -943,6 +946,200 @@ git config core.hooksPath .git/hooks && echo planted > planted.txt`, marker))
 			row.Control = rtOutcome{true, fmt.Sprintf("recorded, plain git apply: %s; outside exists=%v", ev(out), fileExists(outside))}
 			row.Layers = []string{"git's own path validation (Apply relies on it)"}
 			row.Note = "control records git's own layer instead of succeeding (per the brief)"
+		}},
+	}, rtSnapshotProbes()...)
+}
+
+// rtStoryRepo is a repository with src/a.go, notes.md and a benign tracked .npmrc, for the worktree-seeding probes.
+func rtStoryRepo(t *testing.T) string {
+	repo := newRepo(t)
+	writeFile(t, filepath.Join(repo, "src", "a.go"), "package src\n\nfunc A() int { return 1 }\n")
+	writeFile(t, filepath.Join(repo, "notes.md"), "one\ntwo\nthree\n")
+	writeFile(t, filepath.Join(repo, ".npmrc"), "registry=https://registry.npmjs.org/\n")
+	commitAll(t, repo, "story base")
+	return repo
+}
+
+// storyTarget adds a linked worktree of e.wtRepo with the orchestrator's dirty state: a modified README, an untracked
+// file and an untracked copy of a committed blob (a git add would freshen that source object).
+func (e *rtEnv) storyTarget() string {
+	wt := filepath.Join(e.t.TempDir(), "story")
+	git(e.t, e.wtRepo, "worktree", "add", "-q", "--detach", wt)
+	writeFile(e.t, filepath.Join(wt, "README.md"), "orchestrator edit\n")
+	writeFile(e.t, filepath.Join(wt, "untracked.txt"), "dirty\n")
+	writeFile(e.t, filepath.Join(wt, "copy.txt"), "hello\n")
+	return wt
+}
+
+// provisionWorktree provisions r from a worktree under the VM policy.
+func (e *rtEnv) provisionWorktree(r Ref, dir string, allow ...string) (Workspace, error) {
+	vmPolicy(e.t, e.j, r)
+	return e.j.Provision(e.ctx, ProvisionSpec{Ref: r, FromWorktree: dir, SnapshotOptions: SnapshotOptions{AllowSecretPaths: allow}})
+}
+
+func (e *rtEnv) hasVolume(r Ref) bool {
+	_, ok, err := e.j.volumeLabels(e.ctx, WorkspaceVolume(r.Project, r.Worker))
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return ok
+}
+
+// rtSnapshotProbes are the worktree-seeding probes (docs/design/v2/worktree-seeding.md §6).
+func rtSnapshotProbes() []rtProbe {
+	return []rtProbe{
+		{id: "G8-snapshot-isolation", tries: "provision --from-worktree of a dirty linked worktree writes to the source (objects, index, refs, mtimes)", run: func(e *rtEnv, row *rtRow) {
+			wt := e.storyTarget()
+			before := fingerprint(e.t, e.wtRepo, wt)
+			r := Ref{e.p, "w-snap"}
+			ws, err := e.provisionWorktree(r, wt)
+			after := fingerprint(e.t, e.wtRepo, wt)
+			changed := 0
+			for p, v := range after {
+				if before[p] != v {
+					changed++
+				}
+			}
+			_, out := e.jrun(r, time.Minute, "cat untracked.txt README.md; git rev-parse HEAD")
+			row.Jailed = rtOutcome{err == nil && changed == 0 && len(after) == len(before) && strings.Contains(out, "dirty") &&
+				strings.Contains(out, "orchestrator edit") && strings.Contains(out, ws.Base),
+				fmt.Sprintf("err=%v; source paths changed=%d; workspace: %s", err, changed, ev(out))}
+			e.jrun(r, time.Minute, `printf 'package src\n\nfunc A() int { return 2 }\n' > src/a.go && sed -i 's/^two$/TWO/' notes.md`)
+			e.patchS = e.export(r)
+			// Control: the same read-tree and add, but in the source's own repository (no temporary repository).
+			twin := e.storyTarget()
+			tb := fingerprint(e.t, e.wtRepo, twin)
+			idx := filepath.Join(e.t.TempDir(), "index")
+			cmd := exec.Command("sh", "-c", `git read-tree HEAD && git add -A`)
+			cmd.Dir, cmd.Env = twin, append(hostEnv(), "GIT_INDEX_FILE="+idx, "GIT_CONFIG_GLOBAL=/dev/null")
+			cout, cerr := cmd.CombinedOutput()
+			ta := fingerprint(e.t, e.wtRepo, twin)
+			grew := len(ta) - len(tb)
+			for p, v := range ta {
+				if tb[p] != v && tb[p] != "" {
+					grew++
+				}
+			}
+			row.Control = rtOutcome{cerr == nil && grew > 0, fmt.Sprintf("git add against the source's object store: %d source paths written or touched %s", grew, ev(string(cout)))}
+			row.Layers = []string{"temporary repository: writes go to its own object dir, the source is only an alternate"}
+		}},
+		{id: "G8-dirty-conflict", tries: "worker patch with a hunk that conflicts with the orchestrator's dirty change, applied into the dirty worktree", run: func(e *rtEnv, row *rtRow) {
+			if e.patchS == nil {
+				e.t.Fatal("G8-snapshot-isolation did not produce a patch")
+			}
+			target := func() string {
+				wt := e.storyTarget()
+				writeFile(e.t, filepath.Join(wt, "notes.md"), "one\nzwei\nthree\n")
+				return wt
+			}
+			wt := target()
+			before := fingerprint(e.t, wt)
+			_, err := Apply(e.ctx, wt, bytes.NewReader(e.patchS), ApplyOptions{AllowDirty: true})
+			after := fingerprint(e.t, wt)
+			same := len(after) == len(before)
+			for p, v := range before {
+				same = same && after[p] == v
+			}
+			row.Jailed = rtOutcome{err != nil && same, fmt.Sprintf("err=%v; tree byte-identical=%v", ev(fmt.Sprint(err)), same)}
+			wt2 := target()
+			out := plainApply(wt2, e.patchS, "apply", "--reject")
+			b, _ := os.ReadFile(filepath.Join(wt2, "src", "a.go"))
+			row.Control = rtOutcome{strings.Contains(string(b), "return 2"), fmt.Sprintf("git apply --reject (%s): src/a.go half-applied=%v", ev(out), strings.Contains(string(b), "return 2"))}
+			row.Layers = []string{"one all-or-nothing git apply after git apply --check"}
+		}},
+		{id: "G8-dirty-hooks", tries: "hooks planted in the dirty target's hooks dir during apply --allow-dirty", run: func(e *rtEnv, row *rtRow) {
+			if e.patchS == nil {
+				e.t.Fatal("G8-snapshot-isolation did not produce a patch")
+			}
+			// Hooks go to the common hooks dir that every worktree of the repo runs; each call re-plants them with its own marker.
+			// They are removed when the probe ends: e.wtRepo is shared, and a left-over reference-transaction hook whose
+			// marker dir is gone aborts the next probe's `git worktree add`.
+			defer func() {
+				for _, h := range []string{"post-index-change", "pre-applypatch", "post-applypatch", "reference-transaction"} {
+					os.Remove(filepath.Join(e.wtRepo, ".git", "hooks", h))
+				}
+			}()
+			hooked := func() (string, string) {
+				wt := e.storyTarget()
+				marker := filepath.Join(e.t.TempDir(), "hook-marker")
+				for _, h := range []string{"post-index-change", "pre-applypatch", "post-applypatch", "reference-transaction"} {
+					hook := filepath.Join(e.wtRepo, ".git", "hooks", h)
+					if err := os.WriteFile(hook, []byte("#!/bin/sh\ntouch "+marker+"\n"), 0o755); err != nil {
+						e.t.Fatal(err)
+					}
+				}
+				return wt, marker
+			}
+			wt, marker := hooked()
+			_, err := Apply(e.ctx, wt, bytes.NewReader(e.patchS), ApplyOptions{AllowDirty: true})
+			b, _ := os.ReadFile(filepath.Join(wt, "src", "a.go"))
+			row.Jailed = rtOutcome{err == nil && !fileExists(marker) && strings.Contains(string(b), "return 2"),
+				fmt.Sprintf("apply err=%v; marker exists=%v", err, fileExists(marker))}
+			wt2, marker2 := hooked()
+			out := plainApply(wt2, e.patchS, "apply", "--index")
+			row.Control = rtOutcome{fileExists(marker2), fmt.Sprintf("plain git apply --index (%s): marker exists=%v", ev(out), fileExists(marker2))}
+			row.Layers = []string{"core.hooksPath=/dev/null and no index write in apply --allow-dirty"}
+		}},
+		{id: "G7-snapshot-secret", tries: "untracked .env with a canary in the worktree a worker is provisioned from", run: func(e *rtEnv, row *rtRow) {
+			wt := e.storyTarget()
+			writeFile(e.t, filepath.Join(wt, ".env"), "TOKEN=WJRT-CANARY-G7-snapshot-secret\n")
+			r := Ref{e.p, "w-sec"}
+			_, err := e.provisionWorktree(r, wt)
+			row.Jailed = rtOutcome{errors.Is(err, ErrSecret) && !e.hasVolume(r) && !strings.Contains(fmt.Sprint(err), "WJRT-CANARY"),
+				fmt.Sprintf("err=%v; workspace exists=%v", err, e.hasVolume(r))}
+			rc := Ref{e.p, "w-sec-ctl"}
+			_, cerr := e.provisionWorktree(rc, wt, ".env")
+			_, out := e.jrun(rc, time.Minute, "cat .env")
+			row.Control = rtOutcome{cerr == nil && strings.Contains(out, "WJRT-CANARY-G7-snapshot-secret"), fmt.Sprintf("--allow-secret-path .env: err=%v; worker reads: %s", cerr, ev(out))}
+			row.Layers = []string{"secret guard (name rule)"}
+		}},
+		{id: "G7-snapshot-tracked-secret", tries: "tracked .npmrc modified to hold a canary token in the worktree a worker is provisioned from", run: func(e *rtEnv, row *rtRow) {
+			wt := e.storyTarget()
+			writeFile(e.t, filepath.Join(wt, ".npmrc"), "//registry.npmjs.org/:_authToken=WJRT-CANARY-G7-tracked\n")
+			r := Ref{e.p, "w-npm"}
+			_, err := e.provisionWorktree(r, wt)
+			row.Jailed = rtOutcome{errors.Is(err, ErrSecret) && strings.Contains(fmt.Sprint(err), ".npmrc") && !e.hasVolume(r),
+				fmt.Sprintf("err=%v; workspace exists=%v", err, e.hasVolume(r))}
+			rc := Ref{e.p, "w-npm-ctl"}
+			_, cerr := e.provisionWorktree(rc, wt, ".npmrc")
+			_, out := e.jrun(rc, time.Minute, "cat .npmrc")
+			row.Control = rtOutcome{cerr == nil && strings.Contains(out, "WJRT-CANARY-G7-tracked"), fmt.Sprintf("--allow-secret-path .npmrc: err=%v; worker reads: %s", cerr, ev(out))}
+			row.Layers = []string{"secret guard over the whole delta (a modified tracked file)"}
+		}},
+		{id: "G8-snapshot-filter", tries: "filter.x.clean in the source's config writes a host marker during provision --from-worktree", run: func(e *rtEnv, row *rtRow) {
+			dir := newRepo(e.t)
+			marker := filepath.Join(e.t.TempDir(), "filter-marker")
+			git(e.t, dir, "config", "filter.x.clean", "sh -c 'touch "+marker+"; cat'")
+			writeFile(e.t, filepath.Join(dir, ".gitattributes"), "*.txt filter=x\n")
+			writeFile(e.t, filepath.Join(dir, "a.txt"), "raw\n")
+			r := Ref{e.p, "w-flt"}
+			_, err := e.provisionWorktree(r, dir)
+			_, out := e.jrun(r, time.Minute, "cat a.txt")
+			row.Jailed = rtOutcome{err == nil && !fileExists(marker) && strings.Contains(out, "raw"),
+				fmt.Sprintf("err=%v; marker exists=%v; workspace a.txt: %s", err, fileExists(marker), ev(out))}
+			git(e.t, dir, "add", "a.txt")
+			row.Control = rtOutcome{fileExists(marker), fmt.Sprintf("plain git add in the source: marker exists=%v", fileExists(marker))}
+			row.Layers = []string{"empty config in the temporary repository"}
+		}},
+		{id: "G8-seed-replace", tries: "seed-gomod --from-worktree of a go.mod whose replace names a host directory with a canary module", run: func(e *rtEnv, row *rtRow) {
+			host := e.t.TempDir()
+			writeFile(e.t, filepath.Join(host, "go.mod"), "module example.com/canary\n\ngo 1.21\n")
+			writeFile(e.t, filepath.Join(host, "canary.go"), "package canary\n\nconst C = \"WJRT-CANARY-G8-seed-replace\"\n")
+			dir := newRepo(e.t)
+			writeFile(e.t, filepath.Join(dir, "go.mod"), "module example.com/m\n\ngo 1.21\n\nrequire example.com/canary v0.0.0\n\nreplace example.com/canary => "+host+"\n")
+			writeFile(e.t, filepath.Join(dir, "main.go"), "package main\n\nimport \"example.com/canary\"\n\nfunc main() { println(canary.C) }\n")
+			_, err := e.j.SeedGoModWorktree(e.ctx, e.p, dir, SnapshotOptions{})
+			row.Jailed = rtOutcome{errors.Is(err, ErrSeed) && e.j.seedTree(e.p, "gomod") == "", fmt.Sprintf("err=%v", err)}
+			// Control: without the refusal, the seed's own Go (same fixed environment) resolves the host path.
+			env, eerr := worktreeGoEnv(e.t.TempDir())
+			if eerr != nil {
+				e.t.Fatal(eerr)
+			}
+			cmd := exec.Command("go", "list", "-deps", "-f", "{{.Dir}}", ".")
+			cmd.Dir, cmd.Env = dir, env
+			out, cerr := cmd.CombinedOutput()
+			row.Control = rtOutcome{cerr == nil && strings.Contains(string(out), host), fmt.Sprintf("go list in the seed environment: %v %s", cerr, ev(string(out)))}
+			row.Layers = []string{"seed-gomod refuses a filesystem replace"}
 		}},
 	}
 }

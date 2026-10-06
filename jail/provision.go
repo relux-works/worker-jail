@@ -66,6 +66,8 @@ func resolveBase(ctx context.Context, repo, refName string) (base, fullref strin
 
 // Provision creates and clones a workspace, or returns the existing one.
 // It refuses without a stored policy and labels a new workspace with the policy's id and risk.
+// With FromWorktree the base is a snapshot commit of the worktree's current state (snapshot.go); the
+// worktree is never written, and the workspace is also labelled with the snapshot tree and parent.
 func (j *Jail) Provision(ctx context.Context, s ProvisionSpec) (Workspace, error) {
 	ws := Workspace{Ref: s.Ref, Volume: WorkspaceVolume(s.Project, s.Worker)}
 	if err := s.Ref.validate(); err != nil {
@@ -74,6 +76,15 @@ func (j *Jail) Provision(ctx context.Context, s ProvisionSpec) (Workspace, error
 	pol, err := j.servedPolicy(s.Ref)
 	if err != nil {
 		return ws, err
+	}
+	risk := EffectiveRisk(pol).Level
+	if s.FromWorktree != "" {
+		if s.Repo != "" || s.RefName != "" {
+			return ws, errors.New("jail: provision from a worktree takes no repo or ref")
+		}
+		if err := secretOverrideAllowed(s.AllowSecretPaths, risk); err != nil {
+			return ws, err
+		}
 	}
 	unlock, err := j.lockPath(ctx, "ws."+s.Project+"."+s.Worker)
 	if err != nil {
@@ -98,42 +109,83 @@ func (j *Jail) Provision(ctx context.Context, s ProvisionSpec) (Workspace, error
 		}
 		ws.Existed, ws.Base = true, labels[LabelBase]
 		ws.PolicyID, ws.Risk = labels[LabelPolicyID], labels[LabelPolicyRisk]
+		ws.SnapshotTree, ws.SnapshotParent = labels[LabelSnapshotTree], labels[LabelSnapshotParent]
 		ws.Created, _ = time.Parse(time.RFC3339, labels[LabelCreated])
 		return ws, nil
 	}
-	if s.Repo == "" {
-		return ws, errors.New("jail: provision needs a repo")
-	}
-	base, fullref, err := resolveBase(ctx, s.Repo, s.RefName)
-	if err != nil {
-		return ws, err
-	}
-	if fullref == "" {
-		return ws, fmt.Errorf("jail: ref %q resolves to a raw sha; RefName must be a branch, a tag or HEAD", s.RefName)
+	var base string
+	var bundle func(context.Context) *exec.Cmd
+	var extra []string
+	if s.FromWorktree != "" {
+		snap, err := takeSnapshot(ctx, s.FromWorktree, s.SnapshotOptions, j.SnapshotStore())
+		defer snap.close()
+		if err != nil {
+			return ws, err
+		}
+		if err := snap.guard(ctx, s.AllowSecretPaths); err != nil {
+			return ws, err
+		}
+		if err := snap.commit(ctx); err != nil {
+			return ws, err
+		}
+		base, bundle = snap.Commit, snap.bundle
+		ws.SnapshotTree, ws.SnapshotParent = snap.Tree, snap.Parent
+		extra = []string{LabelSnapshotTree + "=" + snap.Tree, LabelSnapshotParent + "=" + snap.Parent}
+	} else {
+		if s.Repo == "" {
+			return ws, errors.New("jail: provision needs a repo or a worktree")
+		}
+		var fullref string
+		if base, fullref, err = resolveBase(ctx, s.Repo, s.RefName); err != nil {
+			return ws, err
+		}
+		if fullref == "" {
+			return ws, fmt.Errorf("jail: ref %q resolves to a raw sha; RefName must be a branch, a tag or HEAD", s.RefName)
+		}
+		bundle = func(ctx context.Context) *exec.Cmd {
+			cmd := exec.CommandContext(ctx, "git", "-C", s.Repo, "bundle", "create", "-", fullref)
+			cmd.Env = hostEnv()
+			return cmd
+		}
 	}
 	created := time.Now().UTC().Truncate(time.Second)
-	risk := EffectiveRisk(pol).Level.String()
-	if err := j.volumeCreate(ctx, ws.Volume, LabelRoot+"=1", LabelKind+"="+KindWorkspace, LabelProject+"="+s.Project,
-		LabelWorker+"="+s.Worker, LabelBase+"="+base, LabelCreated+"="+created.Format(time.RFC3339),
-		LabelPolicyID+"="+pol.ID(), LabelPolicyRisk+"="+risk); err != nil {
+	labelList := append([]string{LabelRoot + "=1", LabelKind + "=" + KindWorkspace, LabelProject + "=" + s.Project,
+		LabelWorker + "=" + s.Worker, LabelBase + "=" + base, LabelCreated + "=" + created.Format(time.RFC3339),
+		LabelPolicyID + "=" + pol.ID(), LabelPolicyRisk + "=" + risk.String()}, extra...)
+	if err := j.volumeCreate(ctx, ws.Volume, labelList...); err != nil {
 		return ws, err
 	}
-	if err := j.cloneInto(ctx, s, base, fullref); err != nil {
+	if err := j.cloneInto(ctx, s.Ref, base, bundle); err != nil {
 		rmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
 		j.dockerOut(rmCtx, nil, "volume", "rm", "-f", ws.Volume)
 		return ws, err
 	}
-	ws.Base, ws.Created, ws.PolicyID, ws.Risk = base, created, pol.ID(), risk
+	ws.Base, ws.Created, ws.PolicyID, ws.Risk = base, created, pol.ID(), risk.String()
 	return ws, nil
 }
 
-func (j *Jail) cloneInto(ctx context.Context, s ProvisionSpec, base, fullref string) error {
+// SnapshotStore is the host object dir that keeps the trees of provisioned snapshots (paths and blob ids, no file
+// content), so apply --snapshot-tree can count diverged paths after the snapshot's temporary repository is gone.
+// Pass it as ApplyOptions.SnapshotObjects.
+func (j *Jail) SnapshotStore() string { return filepath.Join(j.state, "snapshots") }
+
+// secretOverrideAllowed refuses a secret-guard override for a worker whose policy is HIGH or above:
+// such a worker can send data out (design-owner decision 8).
+func secretOverrideAllowed(allow []string, risk Risk) error {
+	if len(allow) > 0 && risk >= RiskHigh {
+		return fmt.Errorf("%w: --allow-secret-path is refused for a %s policy", ErrSecret, risk)
+	}
+	return nil
+}
+
+// cloneInto streams the bundle that newBundle writes into a provisioning call, which clones it and checks out base.
+func (j *Jail) cloneInto(ctx context.Context, r Ref, base string, newBundle func(context.Context) *exec.Cmd) error {
 	bctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	bundle := exec.CommandContext(bctx, "git", "-C", s.Repo, "bundle", "create", "-", fullref)
+	bundle := newBundle(bctx)
 	var berr bytes.Buffer
-	bundle.Stderr, bundle.Env = &berr, hostEnv()
+	bundle.Stderr = &berr
 	pipe, err := bundle.StdoutPipe()
 	if err != nil {
 		return err
@@ -141,9 +193,9 @@ func (j *Jail) cloneInto(ctx context.Context, s ProvisionSpec, base, fullref str
 	if err := bundle.Start(); err != nil {
 		return fmt.Errorf("jail: git bundle: %w", err)
 	}
-	email := s.Worker + "@" + s.Project + ".worker-jail.invalid"
-	res, errb, cerr := j.call(ctx, callSpec{Shape: shapeCall, Project: s.Project, Worker: s.Worker, Workdir: "/work",
-		Timeout: DefaultTimeout, Argv: []string{"sh", "-c", provisionScript, "sh", base, s.Worker, email}}, pipe, &bytes.Buffer{}, 0)
+	email := r.Worker + "@" + r.Project + ".worker-jail.invalid"
+	res, errb, cerr := j.call(ctx, callSpec{Shape: shapeCall, Project: r.Project, Worker: r.Worker, Workdir: "/work",
+		Timeout: DefaultTimeout, Argv: []string{"sh", "-c", provisionScript, "sh", base, r.Worker, email}}, pipe, &bytes.Buffer{}, 0)
 	pipe.Close()
 	werr := bundle.Wait()
 	if cerr != nil {
@@ -205,7 +257,7 @@ type discard struct{}
 
 func (discard) Write(p []byte) (int, error) { return len(p), nil }
 
-// Purge kills P's calls and removes all of P's volumes and digests.
+// Purge kills P's calls and removes all of P's volumes, digests and seed records.
 func (j *Jail) Purge(ctx context.Context, project string) error {
 	if err := ValidName(project); err != nil {
 		return err
@@ -243,7 +295,8 @@ func (j *Jail) Purge(ctx context.Context, project string) error {
 		}
 	}
 	digests, _ := filepath.Glob(filepath.Join(j.state, "exports", project+".*.sha256"))
-	for _, d := range digests {
+	seeds, _ := filepath.Glob(filepath.Join(j.state, "seeds", project+".*.tree"))
+	for _, d := range append(digests, seeds...) {
 		os.Remove(d)
 	}
 	return errors.Join(errs...)

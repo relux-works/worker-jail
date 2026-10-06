@@ -1,4 +1,4 @@
-# worker-jail v1: integration notes
+# worker-jail integration notes (v1 to v2.0)
 
 Status: informative. For remote-worker-harness (rwh) and for the orchestrators who review worker patches.
 The rules are in [`protocol.md`](protocol.md); where this page and the protocol differ, the protocol wins.
@@ -65,6 +65,9 @@ pol, err := j.LoadPolicy(ref)                                   // v2.0: stored 
 expose(pol.Tools); audit(pol.ID(), jail.EffectiveRisk(pol).Level) // tool exposure is the harness's layer (protocol section 14)
 ws, err := j.Provision(ctx, jail.ProvisionSpec{Ref: ref, Repo: projectDir, RefName: "main"}) // labels the workspace with pol.ID()
 err = j.SeedGoMod(ctx, ref.Project, projectDir, "main")        // Go projects; additive, per project
+// v2.0, instead of the two lines above: start from the Story worktree as it is now (section 6a)
+ws, err = j.Provision(ctx, jail.ProvisionSpec{Ref: ref, FromWorktree: storyDir}) // ws.SnapshotTree, ws.SnapshotParent
+tree, err := j.SeedGoModWorktree(ctx, ref.Project, storyDir, jail.SnapshotOptions{}) // no credentials
 
 // per tool call
 res, err := j.Run(ctx, ref, jail.RunSpec{
@@ -96,7 +99,11 @@ that survives the turn for `Export` and `Deprovision`, so an interrupted turn is
 | `ErrBusy` | A call still uses the workspace. | `Kill(P, W)` if the session is over, then retry. |
 | `ErrUnexported` | The workspace differs from base and from the last export. | Export, hand the patch to the orchestrator, then force. |
 | `ErrExportTooLarge` | The patch exceeds 64 MiB. | Discard the partial patch; report to the orchestrator; do not force-deprovision silently. |
-| `ErrDirty` | `apply` target has changes or untracked files. | Use a fresh worktree at base. |
+| `ErrDirty` | `apply` target has changes or untracked files. | Use a fresh worktree at base, or (v2.0) `--allow-dirty` into a linked worktree. |
+| `ErrSnapshot` | v2.0: the worktree cannot be snapshotted: unborn HEAD, a merge, rebase, cherry-pick, revert or bisect in progress, unmerged paths, a sparse checkout, a nested repository among the untracked files, an untracked file over 10 MiB or more than the untracked total (256 MiB unless `--max-untracked-mib`). Nothing is created. | Finish or abort the operation, remove or ignore the file, then provision again. |
+| `ErrSecret` | v2.0: the secret guard found likely secrets in the snapshot's delta; the message lists the paths and the rule (name or content), never the text. Also an `--allow-secret-path` for a HIGH or CRITICAL policy. | Remove the file, ignore it, or (name rule only, operator's decision, never from worker input) pass `--allow-secret-path PATH`. |
+| `ErrSeed` | v2.0: `seed-gomod --from-worktree` refused a filesystem `replace`, a `go.work`, a `toolchain` line or a `vendor/` that disagrees with `go.mod`. | Seed from a landed ref, or fix the worktree. |
+| `ErrDirtyTarget` | v2.0: `apply --allow-dirty` refused the target: a primary checkout, unmerged paths, or an operation in progress. | Apply into a linked worktree (`git worktree add`) in a settled state. |
 | `ErrGitPath` | The patch touches a `.git` path. | Reject the patch outright; it is hostile. |
 | `ErrReviewRequired` | Flagged paths (CI, hooks, agent files, symlinks, gitlinks); CLI exit 4. | Read every flagged hunk; only then re-run with `--allow-review-required`, or reject. |
 | `ErrNoPolicy` | No stored policy for (P, W) (v2.0). Provision and Run refuse; nothing is created. | Ask the operator for a policy (`worker-jail policy set`); never write one from worker input. |
@@ -146,6 +153,33 @@ seeded from `main`. If the change adds a dependency, the offline build fails; la
 
 7. Worker-produced code (tests, Makefile targets, `go generate`, scripts) does not run on the host until the PR has landed.
 
+## 6a. v2.0: seeding from a dirty worktree and applying into it
+
+The Story worktree is a **linked** worktree (`git worktree add ../myproj-story -b story/42`) that holds only what the orchestrator wrote or
+applied after review. rwh's flow (`rwh run --backend jail`, worktree-seeding.md §5):
+
+```sh
+bin/worker-jail policy set --project myproj --worker w1 w1.json                       # no policy, no run
+bin/worker-jail provision --project myproj --worker w1 --from-worktree ../myproj-story
+# myproj.w1 base=<snapshot commit> existed=false snapshot-tree=<tree> snapshot-parent=<HEAD>
+bin/worker-jail seed-gomod --project myproj --from-worktree ../myproj-story          # when the project has a gomod cache
+# ... runs; export after every turn; the report carries the snapshot tree and the policy id and risk ...
+bin/worker-jail apply --repo ../myproj-story --allow-dirty --policy myproj.w1 --snapshot-tree <tree> turn-3.patch
+# target diverged since snapshot: 2 paths     (on stderr, only when the worktree moved; it never blocks)
+```
+
+- The snapshot never writes to the worktree or its repository (not even an object's mtime), and it runs none of its filters, hooks or fsmonitor.
+  Its commit has a fixed identity and date, so the same state gives the same base. `export` diffs against that base: the patch is the worker's delta only.
+- Provision is idempotent: an existing workspace is returned unchanged even if the worktree has moved. To start from the new state,
+  export, deprovision and provision again; `jail.SnapshotTree(ctx, dir)` compared with `Workspace.SnapshotTree` tells whether it moved.
+- The secret guard checks every added or modified path, tracked or not. `--allow-secret-path` is exact, repeatable, covers the name rule only,
+  and is refused for a HIGH or CRITICAL policy. Ignored files never enter the snapshot.
+- `seed-gomod --from-worktree` downloads only public modules, with no credentials: a private module fails and needs `seed-gomod --repo` from a landed ref.
+- `apply --allow-dirty` keeps every v1 gate (`.git`, write scope, symlinks, gitlinks, review-required) and then runs one all-or-nothing
+  `git apply` on the working tree with hooks disabled. It never touches the index, HEAD or refs: stage and commit the result yourself, with hooks disabled.
+  A conflict with your own dirty changes refuses the whole patch and leaves the tree as it was. The primary checkout is always refused.
+- Validate in a jail: `provision --from-worktree` of the same worktree under a verification worker, then `run` the tests.
+
 ## 7. What rwh no longer does for jailed workers
 
 - No host-side file tools: read, write, edit and search all run as `rwh-tool` inside `jail.Run`.
@@ -157,7 +191,7 @@ seeded from `main`. If the change adds a dependency, the offline build fails; la
 
 | command | use |
 | --- | --- |
-| `worker-jail ls [--project P]` | Workspaces (base, created), caches, calls in flight. |
+| `worker-jail ls [--project P]` | Workspaces (base, snapshot tree and parent, created), caches (snapshot tree of the last worktree seed), calls in flight. |
 | `worker-jail kill [--project P] [--worker W]` | Kill calls in flight; prints `killed N`. |
 | `worker-jail usage --project P --worker W` | Workspace bytes. |
 | `worker-jail purge --project P` | Kill P's calls and remove all of P's workspaces, caches and digests. |

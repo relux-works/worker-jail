@@ -1,4 +1,4 @@
-# worker-jail protocol v2.0 (part 1: per-worker policy)
+# worker-jail protocol v2.0 (complete: policy and worktree seeding; egress is v2.1)
 
 Status: normative for every remote worker of the relux-works swarm. Maintained by m1max_worker-jail_orch (formerly worker-jail-72; orchestrator of relux-works/worker-jail).
 
@@ -6,7 +6,8 @@ Version history:
 - v1 (8233a12): the jail, G1 to G8, the interface and the change-extraction path.
 - v1.1 (2026-09-29): adds the write scope and the donor-profile rule.
 - v2.0 part 1 (2026-10-06): adds the per-worker policy (section 14, **new in v2.0**) and changes `provision`, `run` and `apply` (sections 6 and 8, marked "v2.0").
-  v2.0 is split (design-owner decision 11, `docs/design/v2/README.md`): worktree seeding completes v2.0 and is not in this document yet; egress is v2.1.
+- v2.0 part 2 (2026-10-06): adds worktree seeding (section 15, **new in v2.0**): `provision --from-worktree`, the secret guard, `seed-gomod --from-worktree` and `apply --allow-dirty` (sections 6 and 8, marked "v2.0").
+  v2.0 is split (design-owner decision 11, `docs/design/v2/README.md`): v2.0 is policy and worktree seeding, and it is complete; egress is v2.1.
 Changes go through a pull request that the orchestrators of the consuming projects ack (remote-worker-harness first).
 MUST, MUST NOT and SHOULD are used as in RFC 2119. This protocol supersedes the starting design in `design-brief.md` where they differ.
 
@@ -47,8 +48,8 @@ orchestrator --- review --- worker-jail apply --- PR   rootfs  <- image, read-on
 ```
 
 Inputs reach a workspace only as:
-- a git bundle of the base ref (provision);
-- cache seeds that the host builds from the base revision (seed-cache);
+- a git bundle of the base ref (provision), or (**v2.0**) of a snapshot commit of a host worktree's current state, after the secret guard (`provision --from-worktree`, section 15);
+- cache seeds that the host builds from the base revision (seed-cache), or (**v2.0**) from a worktree snapshot without credentials (`seed-gomod --from-worktree`);
 - each call's argv and stdin, passed by the harness.
 
 Outputs leave only as:
@@ -112,7 +113,7 @@ The jail MUST provide every guarantee below. The red-team suite (section 12) pro
 **G8. Changes leave only as a reviewed patch.**
 - `export` builds the patch against base inside a call that mounts the workspace read-only.
 - `apply` never executes worker content: hooks are disabled.
-- `apply` refuses any path under `.git`, and it refuses to run against a dirty target worktree.
+- `apply` refuses any path under `.git`, and it refuses to run against a dirty target worktree. **v2.0:** with `--allow-dirty` it applies into a dirty linked worktree, the working tree only: it never writes the index, HEAD or refs, and a conflict refuses the whole patch (section 8).
 - `apply` also refuses symlinks, gitlinks and review-required paths (section 8) unless the reviewer explicitly allows them.
 - `apply` never commits and never pushes.
 
@@ -138,23 +139,24 @@ The reference implementation is the Go package `github.com/relux-works/worker-ja
 | `provision P W --repo R [--ref F]` | **v2.0:** refuses without a stored policy for (P, W) (`ErrNoPolicy`) and with a policy whose `network.mode` is not `none` (`ErrEgressUnavailable`), before any docker call. Then runs `doctor` and fails closed. Resolves base = `F^{commit}` in R. F is a branch, a tag or `HEAD` (the default); a raw commit id is refused because `git bundle` needs a ref. Creates the workspace, labelled with base and (**v2.0**) with the policy's id and risk (`ai.relux.worker-jail.policy-id`, `ai.relux.worker-jail.policy-risk`), and clones base from a host `git bundle` inside a call: `/work/src` detached at base, `/work/home` as HOME. Idempotent: an existing workspace is returned unchanged, with Existed=true. A failed provision removes its workspace; one left incomplete by a crash is reported as `ErrIncomplete` and needs `deprovision --force`. |
 | `run P W [--timeout D] [--max-output B] -- ARGV` | One call. **v2.0:** before any container starts, re-reads the stored policy and fails closed: `ErrNoPolicy` if it is gone, `ErrPolicyChanged` if its id differs from the workspace's label (a workspace provisioned before v2.0 has no label and fails the same way; export, deprovision and provision it again), `ErrEgressUnavailable` if its `network.mode` is not `none`. The policy's `workspace.access` (read-only mounts `/work` read-only), `limits.cpus`, `limits.memory_mib` and `limits.pids` apply to the call. Waits for a slot, then runs ARGV with the harness's stdin in a fresh container. Returns stdout and stderr (each capped at B), the exit status, TimedOut, Truncated, QueueWait and Duration. **v2.0:** B defaults to and must not exceed the policy's `max_output_bytes`; the timeout defaults to and must not exceed its `call_timeout_s` (at most 60 min). (v1.1: 4 MiB and 10 min defaults.) Output beyond the cap kills the call and sets Truncated. Stdin is streamed into the call without a jail-side limit; the harness caps what it sends. |
 | `export P W [-o FILE]` | Writes the patch from base to the workspace: committed, modified and untracked non-ignored files, binary-safe. It is built in a call that mounts the workspace read-only and is capped at 64 MiB. The patch's sha256 is recorded on the host. |
-| `apply --repo R [--write-scope P,...] [--policy P.W] [--allow-review-required] PATCH` | Host side; see section 8. |
+| `provision P W --from-worktree DIR [--allow-secret-path PATH ...] [--max-untracked-mib N]` | **v2.0**, excludes `--repo` and `--ref`. The same policy gate first, then the override check (`--allow-secret-path` under a HIGH or CRITICAL policy is `ErrSecret`), `doctor` and the existing-workspace check. A new workspace's base is a **snapshot commit** of DIR's current state (tracked changes, staged and untracked non-ignored files), made without writing to DIR, refused with `ErrSnapshot` or `ErrSecret` before any volume exists (section 15). Labels add `ai.relux.worker-jail.snapshot-tree` (the snapshot tree) and `ai.relux.worker-jail.snapshot-parent` (DIR's HEAD at snapshot time); export diffs against the snapshot commit, so a patch holds only the worker's delta. Idempotent as above: an existing workspace is returned unchanged whatever DIR looks like now; compare `SnapshotTree` (`jail.SnapshotTree(ctx, dir)`) to detect a change and re-provision. |
+| `apply --repo R [--write-scope P,...] [--policy P.W] [--allow-review-required] [--allow-dirty [--snapshot-tree OID]] PATCH` | Host side; see section 8. |
 | `deprovision P W [--force]` | Refuses while a call is running. Unless forced, also refuses if the workspace differs both from base and from the last export. Otherwise removes the workspace. |
-| `seed-cache P NAME < TAR`, `seed-gomod P --repo R [--ref F]` | Extracts a host-built tar into the project's cache NAME, inside a call. Seeding is additive. `seed-gomod` builds that tar with the host's Go from the base revision's `go.mod`, `go.sum` and package list: only from a ref the orchestrator has landed, never from a worker branch, because seeding runs with the owner's credentials and could copy private modules of other repositories into the project's cache. Calls of a project that has a `gomod` cache get `GOMODCACHE=/cache/gomod GOPROXY=off GOTOOLCHAIN=local`; `GOFLAGS` is the image's choice. |
+| `seed-cache P NAME < TAR`, `seed-gomod P --repo R [--ref F]` | Extracts a host-built tar into the project's cache NAME, inside a call. Seeding is additive. `seed-gomod` builds that tar with the host's Go from the base revision's `go.mod`, `go.sum` and package list: only from a ref the orchestrator has landed, never from a worker branch, because seeding runs with the owner's credentials and could copy private modules of other repositories into the project's cache. Calls of a project that has a `gomod` cache get `GOMODCACHE=/cache/gomod GOPROXY=off GOTOOLCHAIN=local`; `GOFLAGS` is the image's choice. **v2.0:** `seed-gomod P --from-worktree DIR [--allow-secret-path PATH ...] [--max-untracked-mib N]` builds the tar from a snapshot of DIR (same technique, refusals and secret guard as `provision --from-worktree`; DIR holds orchestrator-owned content only) with **no credentials**: a fixed environment (`GOTOOLCHAIN=local`, `GOFLAGS=-mod=readonly -modcacherw`, `GOENV=off`, `GOPRIVATE=`, `GONOPROXY=`, `GOPROXY=https://proxy.golang.org`, `GOWORK=off`, `GOAUTH=off`, `CGO_ENABLED=0`, HOME and caches in an empty temporary directory, no host variable but `PATH`), so private modules fail and need the landed-ref path. Refused with `ErrSeed`: a `replace` to a filesystem path in any `go.mod`, a `go.work`, a `toolchain` line, a `vendor/` that disagrees with `go.mod`. The host records the snapshot tree of the cache's last worktree seed. |
 | `usage P W` | Bytes used by the workspace. |
-| `ls [P]` | Workspaces (base, creation time), caches, and calls in flight. |
+| `ls [P]` | Workspaces (base, creation time; **v2.0:** snapshot tree and parent), caches (**v2.0:** the snapshot tree of the last worktree seed), and calls in flight. |
 | `kill [P [W]]` | Kills calls in flight. |
 | `purge P` | Kills P's calls and removes all of P's workspaces and caches. |
 | `policy check\|set\|show\|template\|rm` | **v2.0**, host side: validate, store, show, generate and remove per-worker policies; see section 14. |
 | `doctor` | Checks that the endpoint is the workers VM (daemon name `colima-workers`), that the VM's only host share is colima's read-only cache, that the storage driver is overlay2, and that the configured image declares no VOLUME. |
 
 - Every container the jail starts takes a slot and carries the hardening of Appendix A. That covers calls, provisioning, export, seeding and usage.
-- Host-side state lives in `~/.local/state/worker-jail/`: slot locks, workspace locks, export digests and (**v2.0**) stored policies in `policies/<P>.<W>.json`. It holds no secret.
+- Host-side state lives in `~/.local/state/worker-jail/`: slot locks, workspace locks, export digests and (**v2.0**) stored policies in `policies/<P>.<W>.json`, the trees of provisioned snapshots in `snapshots/` (git tree objects: paths and blob ids, no file content) and the snapshot tree of each cache's last worktree seed in `seeds/`. It holds no secret.
 
 ## 7. Network policy
 
 - Calls run with `--network none`. v1 and v2.0 make no exception, not even for dependency downloads.
-- Dependencies come from the image, or from read-only caches that the host seeds from the base revision.
+- Dependencies come from the image, or from read-only caches that the host seeds from the base revision (**v2.0:** or from a worktree snapshot, without credentials, section 6).
 - A worker that needs a new dependency asks its orchestrator. The orchestrator lands the dependency and reseeds the cache.
 - The workers VM itself has egress, which the operator uses to pull base images. Calls cannot use it.
 - Any egress for calls, such as an allowlisted module proxy, requires a new version of this protocol.
@@ -172,8 +174,13 @@ The reference implementation is the Go package `github.com/relux-works/worker-ja
    - **v2.0:** with `--policy P.W` it also refuses every path outside the `workspace.write_scope` of the producing worker's stored policy (`["*"]` is the whole repository, `[]` refuses every path). With both, the effective scope is the intersection: a path must be inside both, so authority only narrows. Same refusal, same exit code, no override; the other gates and their order are unchanged.
    - Unless `--allow-review-required` is given, it also refuses symlinks, gitlinks and the review-required paths below.
    - Paths are matched case-insensitively, because the host filesystem is case-insensitive.
+   - **v2.0, `--allow-dirty`:** imports a patch made against a worktree snapshot into the Story worktree that has moved since. Without the flag, a dirty target is `ErrDirty` as before.
+     - Target: a **linked worktree** only (its git dir differs from the common dir); a primary checkout is refused, and there is no override (design-owner decision 10). No unmerged paths and no merge, rebase, cherry-pick, revert or bisect in progress. Refusals are `ErrDirtyTarget`. The base requirement does not apply: the patch applies by content.
+     - The gates above run first, unchanged and in the same order, on the patch text: `.git` (hard), write scope with `--policy` and `--write-scope` (hard), then symlinks, gitlinks and review-required paths unless `--allow-review-required`. File names are read from the patch headers and must equal git's own parse of the patch, or the patch is refused.
+     - Then `git -c core.hooksPath=/dev/null apply --check` and `git -c core.hooksPath=/dev/null apply` against the working tree (no `--index`). The index, HEAD and refs are never written. git apply is all or nothing: a conflicting hunk, or a new file that collides with an untracked one, refuses the whole patch and leaves the tree byte-identical. The secret guard is not part of apply.
+     - `--snapshot-tree OID` (optional) computes the target's current snapshot tree in a temporary repository (discarded) and prints `target diverged since snapshot: N paths` when it differs. It informs the reviewer and never blocks.
 4. **Commit, rebase and push with hooks disabled** (`git -c core.hooksPath=/dev/null ...`). Open a PR, and land it through the project's normal review.
-5. **Validate** an unlanded worker change only inside a jail or in CI after step 2. In a jail, that means provisioning a verification workspace from the change's branch and running the tests there with `run`. Worker-produced code (tests, Makefile targets, `go generate`, scripts) never runs on the host before it has landed.
+5. **Validate** an unlanded worker change only inside a jail or in CI after step 2. In a jail, that means provisioning a verification workspace from the change's branch (**v2.0:** or `provision --from-worktree` of the worktree it was applied into) and running the tests there with `run`. Worker-produced code (tests, Makefile targets, `go generate`, scripts) never runs on the host before it has landed.
 
 Review-required paths are paths that execute automatically somewhere or instruct agents:
 - **CI:** `.github/**`, `.gitlab-ci.yml`, `.circleci/**`.
@@ -200,13 +207,14 @@ The harness MUST:
 9. Use images derived from `worker-jail/base` and built into the workers VM. Those images hold no secrets and declare no VOLUME.
 10. Keep the model's own tools off on the model host (the donor profile): every tool the model can call executes through `jail.Run`, so an injected task finds no local tool to abuse where the model runs.
 11. **v2.0:** read the worker's policy with `jail.LoadPolicy` (never from worker files or messages), expose only the tools it allows and apply their settings, and record the policy id and risk in the audit log. Start no worker whose policy is missing or invalid.
+12. **v2.0:** provision from the orchestrator's Story worktree with `ProvisionSpec.FromWorktree` (never from a worker branch or an unreviewed patch), record the workspace's `SnapshotTree` and the policy id and risk in the turn report, and take `AllowSecretPaths` only from the operator, never from worker input.
 
 A worker whose tools run outside this jail, for example under Seatbelt only, does not meet this protocol and MUST NOT be presented as jailed.
 
 ## 10. Orchestrator obligations
 
 An orchestrator MUST:
-1. Review a worker patch before applying it, and apply it only with `worker-jail apply` into a clean worktree that is not its live checkout.
+1. Review a worker patch before applying it, and apply it only with `worker-jail apply` into a clean worktree that is not its live checkout (**v2.0:** or, with `--allow-dirty`, into a dirty linked worktree, never the primary checkout).
    Pass the task's write scope (`--write-scope`), and leave tests and other validators of the result out of it unless the task is about them: a worker must not be able to weaken what judges its own work.
 2. Pass `--allow-review-required` only after it has read every flagged hunk.
 3. Commit, rebase and push worker changes with hooks disabled, and never run worker-produced code on the host before it has landed (section 8, step 5).
@@ -243,8 +251,8 @@ Minimum probes per guarantee:
 | G4 | Fork bomb, memory blow-up, CPU burn, an oversized file, an output flood, a call that never ends, and the queue under N+1 concurrent calls. |
 | G5 | Another worker's canary file, the process list, writes to a shared cache. |
 | G6 | A background process (`nohup`, `setsid`) left by one call and looked for in the next; state after `deprovision`. |
-| G7 | An environment dump checked against a canary variable set in the harness process; the ssh-agent socket; credential files. |
-| G8 | Hooks planted in the workspace's `.git`; a crafted patch that writes `.git/hooks`; a symlink patch; a `.github/workflows` patch, with and without `--allow-review-required`; a change outside the write scope; host hooks never fire during `apply`. |
+| G7 | An environment dump checked against a canary variable set in the harness process; the ssh-agent socket; credential files. **v2.0:** an untracked `.env` with a canary in the source worktree (G7-snapshot-secret) and a modified tracked `.npmrc` (G7-snapshot-tracked-secret) are refused by the secret guard; control: `--allow-secret-path` lets the worker read the canary. |
+| G8 | Hooks planted in the workspace's `.git`; a crafted patch that writes `.git/hooks`; a symlink patch; a `.github/workflows` patch, with and without `--allow-review-required`; a change outside the write scope; host hooks never fire during `apply`. **v2.0:** a worktree snapshot leaves the source byte- and mtime-identical (G8-snapshot-isolation; control: `git add` against the source's own object store writes it); a conflicting hunk in a dirty apply refuses the whole patch (G8-dirty-conflict; control: `git apply --reject` half-applies it); a source `filter.*.clean` never runs (G8-snapshot-filter; control: plain `git add`); a filesystem `replace` is refused by `seed-gomod --from-worktree` (G8-seed-replace; control: the seed environment's Go resolves the host path); hooks planted in a dirty target never fire (G8-dirty-hooks; control: `git apply --index`). |
 
 ## 13. Out of scope for v1
 
@@ -297,6 +305,29 @@ A host mask that admits `github.com`, `googleapis.com`, `githubusercontent.com`,
 - `apply --policy P.W` bounds the patch by the policy's `write_scope` (section 8).
 
 **CLI** (`policy check FILE [--json] [--max-risk L]`, `policy set --project P --worker W [--accept-risk CRITICAL] FILE`, `policy show P W [--json]`, `policy template reviewer|developer|yolo-offline --project P --worker W [--write-scope ...] [--go-modules ...]`, `policy rm P W`). Exit codes: 0 ok, 1 invalid policy, 2 usage, 3 not found, 4 risk above `--max-risk` or not accepted, 5 egress unavailable. `--json` prints `{"level", "reasons", "warnings", "policy_id"}`.
+
+## 15. Worktree seeding (new in v2.0)
+
+The full specification is `docs/design/v2/worktree-seeding.md`, as amended by the design-owner decisions in `docs/design/v2/README.md`. This section is the normative summary.
+
+**Snapshot.** `provision --from-worktree`, `seed-gomod --from-worktree`, `jail.SnapshotTree` and `apply --snapshot-tree` capture a worktree the same way, and never write to it (no index refresh, no object, no ref, no touched mtime):
+1. A fresh 0700 temporary directory outside the source holds a bare repository whose alternates name the source's common object dir (linked worktrees work) and a temporary object dir; the source's `info/exclude` is copied.
+2. Every git call against it has an empty config (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_SYSTEM=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`), `core.hooksPath=/dev/null`, `core.fsmonitor=false` and literal pathspecs, so the source's filters, textconv, fsmonitor and hooks never run and the bytes are raw. The read-only calls against the source (`rev-parse`, `ls-files`, `diff-index --cached`) also run with hooks, fsmonitor and the untracked cache off.
+3. `read-tree HEAD`, a stat-only refresh of the temporary index, `add -u`, then `add` of the source's untracked non-ignored files (`ls-files --others --exclude-standard`, which honours nested `.gitignore` and the owner's global excludes) and of files staged as new, fed with `--pathspec-from-file`. `add` and `write-tree` write to the temporary object dir, which has no alternates, so git cannot even freshen an existing source object. `write-tree` gives the **snapshot tree**.
+4. The secret guard (below), before any commit.
+5. `commit-tree -p HEAD` with fixed identity and date (`worker-jail <snapshot@worker-jail.invalid>`, 2000-01-01T00:00:00Z) and no signing: the commit id is a function of the content and the parent.
+6. `update-ref refs/heads/snapshot`, `git bundle create`, then the clone of section 6. The temporary directory is removed on every exit path.
+Gitlinks are carried as pointers only; symlinks as their link text.
+
+**Refusals** (`ErrSnapshot`, with the cause): unborn HEAD; a merge, rebase, cherry-pick, revert or bisect in progress; unmerged paths; a sparse checkout (skip-worktree entries, which the snapshot would record as deletions); a nested git repository among the untracked paths; an untracked file over 10 MiB; more than 256 MiB of untracked files in total (`--max-untracked-mib` sets that total).
+
+**Secret guard** (`ErrSecret`, listing paths, never the matching text), over every path added, modified or type-changed between HEAD and the snapshot tree (ignored files are not in the snapshot):
+- Name rule, case-insensitive on the basename: `.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `.netrc`, `.npmrc`, `.pypirc`, `credentials*.json`.
+- Content rule, in files up to 1 MiB: `-----BEGIN [A-Z ]*PRIVATE KEY-----`, `AKIA[0-9A-Z]{16}`, `ghp_[A-Za-z0-9]{36}`, `github_pat_[A-Za-z0-9_]{50,}`, `xox[bp]-[A-Za-z0-9-]{20,}`.
+- `--allow-secret-path PATH` (exact repository path, repeatable) overrides the name rule only; the content rule has no override. Provision refuses any override when the worker's stored policy is HIGH or CRITICAL (design-owner decision 8). In v2.0 such a policy is already refused by the egress gate, which comes first.
+- The guard is a heuristic: it stops accidents, not a determined owner.
+
+**Errors.** `ErrSnapshot`, `ErrSecret` and `ErrSeed` from provision and seed-gomod; `ErrDirtyTarget` from `apply --allow-dirty`. CLI exit 3, like every jail error.
 
 ## Appendix A: reference container
 

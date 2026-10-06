@@ -180,3 +180,60 @@ func TestApplyPolicy(t *testing.T) {
 		t.Fatalf("whole-repository scope: %d %q %s", code, out, errb)
 	}
 }
+
+// The worktree flags are usage errors (exit 2) before any docker call: exactly one of --repo and --from-worktree,
+// the snapshot flags only with --from-worktree, --snapshot-tree only with --allow-dirty.
+func TestWorktreeFlags(t *testing.T) {
+	e := newEnv(t)
+	patch := e.file("p.patch", "")
+	for _, c := range []struct {
+		args []string
+		msg  string
+	}{
+		{[]string{"provision", "--project", "p1", "--worker", "w1"}, "--repo or --from-worktree"},
+		{[]string{"provision", "--project", "p1", "--worker", "w1", "--from-worktree", e.dir, "--repo", e.dir}, "excludes --repo"},
+		{[]string{"provision", "--project", "p1", "--worker", "w1", "--from-worktree", e.dir, "--ref", "main"}, "excludes --repo and --ref"},
+		{[]string{"provision", "--project", "p1", "--worker", "w1", "--repo", e.dir, "--allow-secret-path", ".env"}, "need --from-worktree"},
+		{[]string{"provision", "--project", "p1", "--worker", "w1", "--from-worktree", e.dir, "--max-untracked-mib", "-1"}, "negative"},
+		{[]string{"seed-gomod", "--project", "p1"}, "--repo or --from-worktree"},
+		{[]string{"seed-gomod", "--project", "p1", "--from-worktree", e.dir, "--repo", e.dir}, "excludes --repo"},
+		{[]string{"apply", "--repo", e.dir, "--snapshot-tree", strings.Repeat("a", 40), patch}, "needs --allow-dirty"},
+	} {
+		if code, _, errb := e.run(c.args...); code != 2 || !strings.Contains(errb, c.msg) {
+			t.Errorf("%q: exit %d %s", c.args, code, errb)
+		}
+	}
+}
+
+// apply --allow-dirty applies into a dirty linked worktree (exit 0, paths on stdout) and reports divergence from
+// --snapshot-tree on stderr without blocking; the primary checkout is refused (exit 3); without the flag, dirty is exit 3.
+func TestApplyAllowDirty(t *testing.T) {
+	e := newEnv(t)
+	repo := t.TempDir()
+	git(t, repo, "init", "-q", "-b", "main")
+	os.WriteFile(filepath.Join(repo, "README.md"), []byte("hello\n"), 0o644)
+	git(t, repo, "add", "-A")
+	git(t, repo, "commit", "-q", "-m", "init")
+	os.WriteFile(filepath.Join(repo, "a.txt"), []byte("a\n"), 0o644)
+	git(t, repo, "add", "-N", "a.txt")
+	patch := e.file("p.patch", git(t, repo, "diff", "--binary", "HEAD"))
+	git(t, repo, "rm", "-q", "--cached", "a.txt")
+	os.Remove(filepath.Join(repo, "a.txt"))
+	wt := filepath.Join(t.TempDir(), "wt")
+	git(t, repo, "worktree", "add", "-q", "-b", "story", wt)
+	os.WriteFile(filepath.Join(wt, "README.md"), []byte("dirty\n"), 0o644)
+
+	if code, _, errb := e.run("apply", "--repo", wt, patch); code != 3 || !strings.Contains(errb, "dirty") {
+		t.Fatalf("without --allow-dirty: %d %s", code, errb)
+	}
+	if code, _, errb := e.run("apply", "--repo", repo, "--allow-dirty", patch); code != 3 || !strings.Contains(errb, "primary checkout") {
+		t.Fatalf("primary checkout: %d %s", code, errb)
+	}
+	code, out, errb := e.run("apply", "--repo", wt, "--allow-dirty", "--snapshot-tree", strings.Repeat("a", 40), patch)
+	if code != 0 || out != "a.txt\n" || !strings.Contains(errb, "target diverged since snapshot: unknown number of paths") {
+		t.Fatalf("dirty apply: %d %q %s", code, out, errb)
+	}
+	if b, _ := os.ReadFile(filepath.Join(wt, "README.md")); string(b) != "dirty\n" {
+		t.Fatalf("unrelated change lost: %q", b)
+	}
+}

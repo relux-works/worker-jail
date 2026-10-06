@@ -10,7 +10,8 @@ import (
 )
 
 const volumeFormat = `{{.Name}}\t{{.Label "` + LabelKind + `"}}\t{{.Label "` + LabelProject + `"}}\t{{.Label "` +
-	LabelWorker + `"}}\t{{.Label "` + LabelCache + `"}}\t{{.Label "` + LabelBase + `"}}\t{{.Label "` + LabelCreated + `"}}`
+	LabelWorker + `"}}\t{{.Label "` + LabelCache + `"}}\t{{.Label "` + LabelBase + `"}}\t{{.Label "` + LabelCreated + `"}}\t{{.Label "` +
+	LabelSnapshotTree + `"}}\t{{.Label "` + LabelSnapshotParent + `"}}`
 
 const callFormat = `{{.ID}}\t{{.Label "` + LabelProject + `"}}\t{{.Label "` + LabelWorker + `"}}\t{{.Status}}`
 
@@ -44,15 +45,17 @@ func (j *Jail) List(ctx context.Context, project string) (Listing, error) {
 	}
 	for _, line := range splitLines(out) {
 		f := strings.Split(line, "\t")
-		if len(f) < 7 {
+		if len(f) < 9 {
 			continue
 		}
 		created, _ := time.Parse(time.RFC3339, f[6])
 		switch f[1] {
 		case KindWorkspace:
-			l.Workspaces = append(l.Workspaces, Workspace{Ref: Ref{f[2], f[3]}, Volume: f[0], Base: f[5], Created: created})
+			l.Workspaces = append(l.Workspaces, Workspace{Ref: Ref{f[2], f[3]}, Volume: f[0], Base: f[5], Created: created,
+				SnapshotTree: f[7], SnapshotParent: f[8]})
 		case KindCache:
-			l.Caches = append(l.Caches, Cache{Project: f[2], Name: f[4], Volume: f[0], Created: created})
+			l.Caches = append(l.Caches, Cache{Project: f[2], Name: f[4], Volume: f[0], Created: created,
+				SnapshotTree: j.seedTree(f[2], f[4])})
 		}
 	}
 	out, errb, exit, err = j.dockerOut(ctx, nil, append(append([]string{"ps", "-a"}, callFilters(project, "")...), "--format", callFormat)...)

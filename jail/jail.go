@@ -30,6 +30,10 @@ const (
 	// LabelPolicyID and LabelPolicyRisk record the policy a workspace was provisioned under (v2.0).
 	LabelPolicyID   = LabelRoot + ".policy-id"
 	LabelPolicyRisk = LabelRoot + ".policy-risk"
+	// LabelSnapshotTree and LabelSnapshotParent record a workspace provisioned from a worktree snapshot (v2.0):
+	// the snapshot's tree and the worktree's HEAD at snapshot time. The base label is the snapshot commit.
+	LabelSnapshotTree   = LabelRoot + ".snapshot-tree"
+	LabelSnapshotParent = LabelRoot + ".snapshot-parent"
 
 	KindWorkspace = "workspace"
 	KindCache     = "cache"
@@ -65,6 +69,11 @@ var (
 	ErrPolicyChanged     = errors.New("stored policy differs from the workspace's")
 	ErrEgressUnavailable = errors.New("egress unavailable: network modes other than none arrive in v2.1")
 	ErrRiskExceeded      = errors.New("policy risk above the accepted level")
+
+	ErrSnapshot    = errors.New("worktree cannot be snapshotted")
+	ErrSecret      = errors.New("secret guard: the snapshot holds likely secrets")
+	ErrSeed        = errors.New("worktree cannot seed the module cache")
+	ErrDirtyTarget = errors.New("target worktree refused for a dirty apply")
 )
 
 // Limits are per-call resource limits. Zero fields take the defaults.
@@ -145,7 +154,7 @@ func New(cfg Config) (*Jail, error) {
 	if l.CPUs < 0 || l.Memory < 0 || l.Tmp < 0 || l.FileSize < 0 || l.Pids < 0 || l.NoFile < 0 {
 		return nil, errors.New("jail: negative limit")
 	}
-	for _, sub := range []string{"", "slots", "locks", "exports", "policies", "docker-config"} {
+	for _, sub := range []string{"", "slots", "locks", "exports", "policies", "seeds", "snapshots", "docker-config"} {
 		if err := os.MkdirAll(filepath.Join(j.state, sub), 0o700); err != nil {
 			return nil, fmt.Errorf("jail: state dir: %w", err)
 		}
@@ -210,14 +219,21 @@ type Workspace struct {
 	Ref
 	Volume, Base   string
 	PolicyID, Risk string // from the labels; empty for a workspace provisioned before v2.0
-	Created        time.Time
-	Existed        bool
+	// SnapshotTree and SnapshotParent are set for a workspace provisioned from a worktree (v2.0):
+	// the snapshot's tree and the worktree's HEAD at snapshot time. Base is then the snapshot commit.
+	SnapshotTree, SnapshotParent string
+	Created                      time.Time
+	Existed                      bool
 }
 
-// ProvisionSpec is the input of Provision.
+// ProvisionSpec is the input of Provision. Exactly one source: Repo (with RefName, default "HEAD"),
+// or FromWorktree, a worktree whose current state, dirty and untracked files included, is snapshotted.
+// SnapshotOptions apply to FromWorktree only.
 type ProvisionSpec struct {
 	Ref
-	Repo, RefName string // RefName default "HEAD"
+	Repo, RefName string
+	FromWorktree  string
+	SnapshotOptions
 }
 
 // RunSpec is the input of Run.
@@ -244,6 +260,7 @@ type ExportInfo struct {
 
 type Cache struct {
 	Project, Name, Volume string
+	SnapshotTree          string // the last worktree snapshot that seeded the cache (v2.0), from host state
 	Created               time.Time
 }
 

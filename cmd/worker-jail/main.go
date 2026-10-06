@@ -1,4 +1,4 @@
-// Command worker-jail is the CLI of the worker-jail protocol (docs/protocol.md), v2.0 policy included.
+// Command worker-jail is the CLI of the worker-jail protocol (docs/protocol.md) v2.0: policy and worktree seeding.
 package main
 
 import (
@@ -26,12 +26,15 @@ const usage = `usage: worker-jail [--image IMG] [--state-dir DIR] [--slots N] [-
 commands:
   doctor
   provision   --project P --worker W --repo PATH [--ref REF]
+  provision   --project P --worker W --from-worktree DIR [--allow-secret-path PATH ...] [--max-untracked-mib N]
   run         --project P --worker W [--timeout D] [--max-output B] -- ARGV...   (defaults and maximums: the policy's)
   export      --project P --worker W [-o FILE]
-  apply       --repo PATH [--write-scope P1,P2,...] [--policy P.W] [--allow-review-required] PATCH
+  apply       --repo PATH [--write-scope P1,P2,...] [--policy P.W] [--allow-review-required]
+              [--allow-dirty [--snapshot-tree OID]] PATCH
   deprovision --project P --worker W [--force]
   seed-cache  --project P --name NAME   (tar on stdin)
   seed-gomod  --project P --repo PATH [--ref REF]
+  seed-gomod  --project P --from-worktree DIR [--allow-secret-path PATH ...] [--max-untracked-mib N]
   usage       --project P --worker W
   ls          [--project P]
   kill        [--project P] [--worker W]
@@ -204,17 +207,54 @@ func (c *cli) doctor(ctx context.Context, args []string) (int, error) {
 	return 0, err
 }
 
+// withSnapshot adds the worktree-snapshot flags of provision and seed-gomod.
+func (f *flags) withSnapshot(o *jail.SnapshotOptions) *string {
+	dir := f.String("from-worktree", "", "snapshot this worktree, dirty and untracked files included (excludes --repo and --ref)")
+	f.Func("allow-secret-path", "exact repository path the secret guard's name rule lets through; repeatable (refused at HIGH and above)", func(v string) error {
+		o.AllowSecretPaths = append(o.AllowSecretPaths, v)
+		return nil
+	})
+	f.IntVar(&o.MaxUntrackedMiB, "max-untracked-mib", 0, "total untracked bytes a snapshot may hold, in MiB (0: 256)")
+	return dir
+}
+
+// source checks that exactly one of --repo and --from-worktree is given, and the flags that go with it.
+func (f *flags) source(fromWorktree string, o jail.SnapshotOptions) error {
+	set := map[string]bool{}
+	f.Visit(func(fl *flag.Flag) { set[fl.Name] = true })
+	switch {
+	case fromWorktree == "" && !set["repo"]:
+		return usageError{"--repo or --from-worktree is required"}
+	case fromWorktree != "" && (set["repo"] || set["ref"]):
+		return usageError{"--from-worktree excludes --repo and --ref"}
+	case fromWorktree == "" && (len(o.AllowSecretPaths) > 0 || o.MaxUntrackedMiB != 0):
+		return usageError{"--allow-secret-path and --max-untracked-mib need --from-worktree"}
+	case o.MaxUntrackedMiB < 0:
+		return usageError{"--max-untracked-mib must not be negative"}
+	}
+	return nil
+}
+
 func (c *cli) provision(ctx context.Context, args []string) (int, error) {
 	f := newFlags("provision", c.stderr).withRef()
-	repo, ref := f.String("repo", "", "repository path"), f.String("ref", "HEAD", "branch, tag or HEAD")
-	if err := f.parse(args, "project", "worker", "repo"); err != nil {
+	repo, ref := f.String("repo", "", "repository path"), f.String("ref", "", "branch, tag or HEAD (default HEAD)")
+	var o jail.SnapshotOptions
+	dir := f.withSnapshot(&o)
+	if err := f.parse(args, "project", "worker"); err != nil {
 		return 0, err
 	}
-	ws, err := c.j.Provision(ctx, jail.ProvisionSpec{Ref: f.ref(), Repo: *repo, RefName: *ref})
+	if err := f.source(*dir, o); err != nil {
+		return 0, err
+	}
+	ws, err := c.j.Provision(ctx, jail.ProvisionSpec{Ref: f.ref(), Repo: *repo, RefName: *ref, FromWorktree: *dir, SnapshotOptions: o})
 	if err != nil {
 		return 0, err
 	}
-	fmt.Fprintf(c.stdout, "%s base=%s existed=%v\n", ws.Volume, ws.Base, ws.Existed)
+	fmt.Fprintf(c.stdout, "%s base=%s existed=%v", ws.Volume, ws.Base, ws.Existed)
+	if ws.SnapshotTree != "" {
+		fmt.Fprintf(c.stdout, " snapshot-tree=%s snapshot-parent=%s", ws.SnapshotTree, ws.SnapshotParent)
+	}
+	fmt.Fprintln(c.stdout)
 	return 0, nil
 }
 
@@ -291,9 +331,11 @@ func (c *cli) export(ctx context.Context, args []string) (int, error) {
 
 func cmdApply(ctx context.Context, cfg jail.Config, args []string, stdout, stderr io.Writer) error {
 	f := newFlags("apply", stderr)
-	repo := f.String("repo", "", "clean target worktree")
+	repo := f.String("repo", "", "clean target worktree (with --allow-dirty: a linked worktree, dirty or not)")
 	policy := f.String("policy", "", "PROJECT.WORKER whose stored policy's write_scope also bounds the patch")
 	allow := f.Bool("allow-review-required", false, "apply flagged paths after reading every flagged hunk")
+	dirty := f.Bool("allow-dirty", false, "apply into a dirty linked worktree, working tree only (never the index, HEAD or refs)")
+	snapTree := f.String("snapshot-tree", "", "with --allow-dirty: the snapshot tree the patch was made against; reports divergence")
 	var scope []string
 	f.Func("write-scope", "comma-separated path prefixes the patch may touch (dir/ or file); repeatable", func(v string) error {
 		scope = append(scope, strings.Split(v, ",")...)
@@ -305,21 +347,29 @@ func cmdApply(ctx context.Context, cfg jail.Config, args []string, stdout, stder
 	if f.NArg() != 1 {
 		return usageError{"apply needs exactly one PATCH file"}
 	}
-	opts := jail.ApplyOptions{AllowReviewRequired: *allow, WriteScope: scope}
-	if *policy != "" {
-		project, worker, ok := strings.Cut(*policy, ".")
-		if !ok {
-			return usageError{"--policy takes PROJECT.WORKER"}
-		}
+	if *snapTree != "" && !*dirty {
+		return usageError{"--snapshot-tree needs --allow-dirty"}
+	}
+	opts := jail.ApplyOptions{AllowReviewRequired: *allow, WriteScope: scope, AllowDirty: *dirty, SnapshotTree: *snapTree}
+	if *policy != "" || *snapTree != "" {
 		j, err := jail.New(cfg)
 		if err != nil {
 			return err
 		}
-		pol, err := j.LoadPolicy(jail.Ref{Project: project, Worker: worker})
-		if err != nil {
-			return err
+		if *snapTree != "" {
+			opts.SnapshotObjects = j.SnapshotStore()
 		}
-		opts.PolicyScope = &pol.Workspace.WriteScope
+		if *policy != "" {
+			project, worker, ok := strings.Cut(*policy, ".")
+			if !ok {
+				return usageError{"--policy takes PROJECT.WORKER"}
+			}
+			pol, err := j.LoadPolicy(jail.Ref{Project: project, Worker: worker})
+			if err != nil {
+				return err
+			}
+			opts.PolicyScope = &pol.Workspace.WriteScope
+		}
 	}
 	p, err := os.Open(f.Arg(0))
 	if err != nil {
@@ -327,6 +377,14 @@ func cmdApply(ctx context.Context, cfg jail.Config, args []string, stdout, stder
 	}
 	defer p.Close()
 	rep, err := jail.Apply(ctx, *repo, p, opts)
+	switch {
+	case rep.TargetTreeErr != nil:
+		fmt.Fprintf(stderr, "target snapshot unavailable: %v\n", rep.TargetTreeErr)
+	case rep.TargetTree != "" && rep.TargetTree != *snapTree && rep.Diverged >= 0:
+		fmt.Fprintf(stderr, "target diverged since snapshot: %d paths\n", rep.Diverged)
+	case rep.TargetTree != "" && rep.TargetTree != *snapTree:
+		fmt.Fprintf(stderr, "target diverged since snapshot: unknown number of paths (snapshot tree %s not found)\n", *snapTree)
+	}
 	for _, pth := range rep.OutOfScope {
 		fmt.Fprintf(stderr, "out of scope: %s\n", pth)
 	}
@@ -366,10 +424,22 @@ func (c *cli) seedGoMod(ctx context.Context, args []string) (int, error) {
 	f := newFlags("seed-gomod", c.stderr)
 	project := f.String("project", "", "project")
 	repo, ref := f.String("repo", "", "repository path"), f.String("ref", "HEAD", "revision")
-	if err := f.parse(args, "project", "repo"); err != nil {
+	var o jail.SnapshotOptions
+	dir := f.withSnapshot(&o)
+	if err := f.parse(args, "project"); err != nil {
 		return 0, err
 	}
-	return 0, c.j.SeedGoMod(ctx, *project, *repo, *ref)
+	if err := f.source(*dir, o); err != nil {
+		return 0, err
+	}
+	if *dir == "" {
+		return 0, c.j.SeedGoMod(ctx, *project, *repo, *ref)
+	}
+	tree, err := c.j.SeedGoModWorktree(ctx, *project, *dir, o)
+	if err == nil {
+		fmt.Fprintf(c.stdout, "%s snapshot-tree=%s\n", jail.CacheVolume(*project, "gomod"), tree)
+	}
+	return 0, err
 }
 
 func (c *cli) usage(ctx context.Context, args []string) (int, error) {
@@ -395,21 +465,28 @@ func (c *cli) ls(ctx context.Context, args []string) (int, error) {
 		return 0, err
 	}
 	tw := tabwriter.NewWriter(c.stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "KIND\tNAME\tPROJECT\tWORKER/CACHE\tBASE/STATUS\tCREATED")
+	fmt.Fprintln(tw, "KIND\tNAME\tPROJECT\tWORKER/CACHE\tBASE/STATUS\tSNAPSHOT-TREE\tSNAPSHOT-PARENT\tCREATED")
 	ts := func(t time.Time) string {
 		if t.IsZero() {
 			return "-"
 		}
 		return t.Format(time.RFC3339)
 	}
+	dash := func(s string) string {
+		if s == "" {
+			return "-"
+		}
+		return s
+	}
 	for _, w := range l.Workspaces {
-		fmt.Fprintf(tw, "workspace\t%s\t%s\t%s\t%s\t%s\n", w.Volume, w.Project, w.Worker, w.Base, ts(w.Created))
+		fmt.Fprintf(tw, "workspace\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", w.Volume, w.Project, w.Worker, w.Base,
+			dash(w.SnapshotTree), dash(w.SnapshotParent), ts(w.Created))
 	}
 	for _, ca := range l.Caches {
-		fmt.Fprintf(tw, "cache\t%s\t%s\t%s\t-\t%s\n", ca.Volume, ca.Project, ca.Name, ts(ca.Created))
+		fmt.Fprintf(tw, "cache\t%s\t%s\t%s\t-\t%s\t-\t%s\n", ca.Volume, ca.Project, ca.Name, dash(ca.SnapshotTree), ts(ca.Created))
 	}
 	for _, cl := range l.Calls {
-		fmt.Fprintf(tw, "call\t%s\t%s\t%s\t%s\t-\n", cl.ID, cl.Project, cl.Worker, strings.ReplaceAll(cl.Status, "\t", " "))
+		fmt.Fprintf(tw, "call\t%s\t%s\t%s\t%s\t-\t-\t-\n", cl.ID, cl.Project, cl.Worker, strings.ReplaceAll(cl.Status, "\t", " "))
 	}
 	return 0, tw.Flush()
 }
