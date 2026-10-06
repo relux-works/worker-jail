@@ -29,6 +29,19 @@ func itJail(t *testing.T, image string) *Jail {
 	return j
 }
 
+// vmPolicy stores the policy the VM suites provision under: the v1 call shape (yolo, read-write, network none)
+// with the jail's default limits, the protocol's maximum timeout and a 64 MiB output cap. Run re-reads it,
+// so a second Jail on another state dir needs it too; the same bytes give the same id.
+func vmPolicy(t *testing.T, j *Jail, r Ref) {
+	t.Helper()
+	data := []byte(`{"version":1,"project":"` + r.Project + `","worker":"` + r.Worker + `","tools":{"mode":"yolo"},
+ "workspace":{"access":"read-write","write_scope":["*"]},"network":{"mode":"none"},
+ "limits":{"cpus":2,"memory_mib":2048,"pids":512,"call_timeout_s":3600,"max_output_bytes":67108864,"disk_soft_mib":4096}}`)
+	if _, err := j.SetPolicy(context.Background(), r, data, SetPolicyOptions{}); err != nil {
+		t.Fatalf("policy %v: %v", r, err)
+	}
+}
+
 func itProject(t *testing.T, j *Jail) string {
 	t.Helper()
 	b := make([]byte, 4)
@@ -79,6 +92,7 @@ func TestIntegrationMainFlow(t *testing.T) {
 	ctx := context.Background()
 	repo, _ := filepath.Abs("..")
 	r := Ref{itProject(t, j), "w1"}
+	vmPolicy(t, j, r)
 	ws, err := j.Provision(ctx, ProvisionSpec{Ref: r, Repo: repo})
 	if err != nil {
 		t.Fatal(err)
@@ -128,6 +142,7 @@ func itWorkspace(t *testing.T, j *Jail) Ref {
 	t.Helper()
 	repo, _ := filepath.Abs("..")
 	r := Ref{itProject(t, j), "w1"}
+	vmPolicy(t, j, r)
 	if _, err := j.Provision(context.Background(), ProvisionSpec{Ref: r, Repo: repo}); err != nil {
 		t.Fatal(err)
 	}
@@ -206,6 +221,7 @@ func main() { var g errgroup.Group; g.Go(func() error { return nil }); _ = g.Wai
 	seeded := Ref{itProject(t, j), "w1"}
 	bare := Ref{itProject(t, j), "w1"}
 	for _, r := range []Ref{seeded, bare} {
+		vmPolicy(t, j, r)
 		if _, err := j.Provision(ctx, ProvisionSpec{Ref: r, Repo: repo}); err != nil {
 			t.Fatal(err)
 		}

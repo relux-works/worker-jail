@@ -1,6 +1,12 @@
-# worker-jail protocol v1.1
+# worker-jail protocol v2.0 (part 1: per-worker policy)
 
-Status: normative for every remote worker of the relux-works swarm. v1.1 (2026-09-29) adds the write scope and the donor-profile rule to v1 (8233a12). Maintained by worker-jail-72 (orchestrator of relux-works/worker-jail).
+Status: normative for every remote worker of the relux-works swarm. Maintained by m1max_worker-jail_orch (formerly worker-jail-72; orchestrator of relux-works/worker-jail).
+
+Version history:
+- v1 (8233a12): the jail, G1 to G8, the interface and the change-extraction path.
+- v1.1 (2026-09-29): adds the write scope and the donor-profile rule.
+- v2.0 part 1 (2026-10-06): adds the per-worker policy (section 14, **new in v2.0**) and changes `provision`, `run` and `apply` (sections 6 and 8, marked "v2.0").
+  v2.0 is split (design-owner decision 11, `docs/design/v2/README.md`): worktree seeding completes v2.0 and is not in this document yet; egress is v2.1.
 Changes go through a pull request that the orchestrators of the consuming projects ack (remote-worker-harness first).
 MUST, MUST NOT and SHOULD are used as in RFC 2119. This protocol supersedes the starting design in `design-brief.md` where they differ.
 
@@ -129,28 +135,30 @@ The reference implementation is the Go package `github.com/relux-works/worker-ja
 
 | operation | semantics |
 | --- | --- |
-| `provision P W --repo R [--ref F]` | Runs `doctor` and fails closed. Resolves base = `F^{commit}` in R. F is a branch, a tag or `HEAD` (the default); a raw commit id is refused because `git bundle` needs a ref. Creates the workspace, labelled with base, and clones base from a host `git bundle` inside a call: `/work/src` detached at base, `/work/home` as HOME. Idempotent: an existing workspace is returned unchanged, with Existed=true. A failed provision removes its workspace; one left incomplete by a crash is reported as `ErrIncomplete` and needs `deprovision --force`. |
-| `run P W [--timeout D] [--max-output B] -- ARGV` | One call. Waits for a slot, then runs ARGV with the harness's stdin in a fresh container. Returns stdout and stderr (each capped at B, default 4 MiB), the exit status, TimedOut, Truncated, QueueWait and Duration. Timeout defaults to 10 min, maximum 60 min. Output beyond the cap kills the call and sets Truncated. Stdin is streamed into the call without a jail-side limit; the harness caps what it sends. |
+| `provision P W --repo R [--ref F]` | **v2.0:** refuses without a stored policy for (P, W) (`ErrNoPolicy`) and with a policy whose `network.mode` is not `none` (`ErrEgressUnavailable`), before any docker call. Then runs `doctor` and fails closed. Resolves base = `F^{commit}` in R. F is a branch, a tag or `HEAD` (the default); a raw commit id is refused because `git bundle` needs a ref. Creates the workspace, labelled with base and (**v2.0**) with the policy's id and risk (`ai.relux.worker-jail.policy-id`, `ai.relux.worker-jail.policy-risk`), and clones base from a host `git bundle` inside a call: `/work/src` detached at base, `/work/home` as HOME. Idempotent: an existing workspace is returned unchanged, with Existed=true. A failed provision removes its workspace; one left incomplete by a crash is reported as `ErrIncomplete` and needs `deprovision --force`. |
+| `run P W [--timeout D] [--max-output B] -- ARGV` | One call. **v2.0:** before any container starts, re-reads the stored policy and fails closed: `ErrNoPolicy` if it is gone, `ErrPolicyChanged` if its id differs from the workspace's label (a workspace provisioned before v2.0 has no label and fails the same way; export, deprovision and provision it again), `ErrEgressUnavailable` if its `network.mode` is not `none`. The policy's `workspace.access` (read-only mounts `/work` read-only), `limits.cpus`, `limits.memory_mib` and `limits.pids` apply to the call. Waits for a slot, then runs ARGV with the harness's stdin in a fresh container. Returns stdout and stderr (each capped at B), the exit status, TimedOut, Truncated, QueueWait and Duration. **v2.0:** B defaults to and must not exceed the policy's `max_output_bytes`; the timeout defaults to and must not exceed its `call_timeout_s` (at most 60 min). (v1.1: 4 MiB and 10 min defaults.) Output beyond the cap kills the call and sets Truncated. Stdin is streamed into the call without a jail-side limit; the harness caps what it sends. |
 | `export P W [-o FILE]` | Writes the patch from base to the workspace: committed, modified and untracked non-ignored files, binary-safe. It is built in a call that mounts the workspace read-only and is capped at 64 MiB. The patch's sha256 is recorded on the host. |
-| `apply --repo R [--write-scope P,...] [--allow-review-required] PATCH` | Host side; see section 8. |
+| `apply --repo R [--write-scope P,...] [--policy P.W] [--allow-review-required] PATCH` | Host side; see section 8. |
 | `deprovision P W [--force]` | Refuses while a call is running. Unless forced, also refuses if the workspace differs both from base and from the last export. Otherwise removes the workspace. |
 | `seed-cache P NAME < TAR`, `seed-gomod P --repo R [--ref F]` | Extracts a host-built tar into the project's cache NAME, inside a call. Seeding is additive. `seed-gomod` builds that tar with the host's Go from the base revision's `go.mod`, `go.sum` and package list: only from a ref the orchestrator has landed, never from a worker branch, because seeding runs with the owner's credentials and could copy private modules of other repositories into the project's cache. Calls of a project that has a `gomod` cache get `GOMODCACHE=/cache/gomod GOPROXY=off GOTOOLCHAIN=local`; `GOFLAGS` is the image's choice. |
 | `usage P W` | Bytes used by the workspace. |
 | `ls [P]` | Workspaces (base, creation time), caches, and calls in flight. |
 | `kill [P [W]]` | Kills calls in flight. |
 | `purge P` | Kills P's calls and removes all of P's workspaces and caches. |
+| `policy check\|set\|show\|template\|rm` | **v2.0**, host side: validate, store, show, generate and remove per-worker policies; see section 14. |
 | `doctor` | Checks that the endpoint is the workers VM (daemon name `colima-workers`), that the VM's only host share is colima's read-only cache, that the storage driver is overlay2, and that the configured image declares no VOLUME. |
 
 - Every container the jail starts takes a slot and carries the hardening of Appendix A. That covers calls, provisioning, export, seeding and usage.
-- Host-side state lives in `~/.local/state/worker-jail/`: slot locks, workspace locks and export digests. It holds no secret.
+- Host-side state lives in `~/.local/state/worker-jail/`: slot locks, workspace locks, export digests and (**v2.0**) stored policies in `policies/<P>.<W>.json`. It holds no secret.
 
 ## 7. Network policy
 
-- Calls run with `--network none`. v1 makes no exception, not even for dependency downloads.
+- Calls run with `--network none`. v1 and v2.0 make no exception, not even for dependency downloads.
 - Dependencies come from the image, or from read-only caches that the host seeds from the base revision.
 - A worker that needs a new dependency asks its orchestrator. The orchestrator lands the dependency and reseeds the cache.
 - The workers VM itself has egress, which the operator uses to pull base images. Calls cannot use it.
 - Any egress for calls, such as an allowlisted module proxy, requires a new version of this protocol.
+- **v2.0:** a policy (section 14) may name the network modes `modules`, `allowlist`, `denylist` and `all`, and `policy check` validates and rates them, but v2.0 serves none of them: `policy set`, `provision` and `run` refuse them with `ErrEgressUnavailable`. Egress arrives in v2.1.
 
 ## 8. Change extraction
 
@@ -161,6 +169,7 @@ The reference implementation is the Go package `github.com/relux-works/worker-ja
    - `apply` first dry-runs the patch into a temporary index, then applies it with `git -c core.hooksPath=/dev/null apply --index`.
    - It always refuses paths under `.git`, however they are spelled.
    - With `--write-scope P1,P2,...` (repository-relative path prefixes; a trailing `/` means a directory, otherwise an exact file) it refuses every path outside the task's write scope. This refusal has no override.
+   - **v2.0:** with `--policy P.W` it also refuses every path outside the `workspace.write_scope` of the producing worker's stored policy (`["*"]` is the whole repository, `[]` refuses every path). With both, the effective scope is the intersection: a path must be inside both, so authority only narrows. Same refusal, same exit code, no override; the other gates and their order are unchanged.
    - Unless `--allow-review-required` is given, it also refuses symlinks, gitlinks and the review-required paths below.
    - Paths are matched case-insensitively, because the host filesystem is case-insensitive.
 4. **Commit, rebase and push with hooks disabled** (`git -c core.hooksPath=/dev/null ...`). Open a PR, and land it through the project's normal review.
@@ -190,6 +199,7 @@ The harness MUST:
 8. Deprovision a worker at the end of its life, and use `ls` to find the workspaces of dead sessions.
 9. Use images derived from `worker-jail/base` and built into the workers VM. Those images hold no secrets and declare no VOLUME.
 10. Keep the model's own tools off on the model host (the donor profile): every tool the model can call executes through `jail.Run`, so an injected task finds no local tool to abuse where the model runs.
+11. **v2.0:** read the worker's policy with `jail.LoadPolicy` (never from worker files or messages), expose only the tools it allows and apply their settings, and record the policy id and risk in the audit log. Start no worker whose policy is missing or invalid.
 
 A worker whose tools run outside this jail, for example under Seatbelt only, does not meet this protocol and MUST NOT be presented as jailed.
 
@@ -244,6 +254,50 @@ Minimum probes per guarantee:
 - Hard disk quotas.
 - gVisor.
 
+## 14. Per-worker policy (new in v2.0)
+
+The full specification is `docs/design/v2/policy.md`, as amended by the design-owner decisions in `docs/design/v2/README.md`. This section is the normative summary.
+
+**Model.** Every (project, worker) has exactly one policy file, host-owned and reviewed like code, never derived from worker files or messages. No policy, no worker. Nothing is implied: every field is written out, `yolo` and `network.mode: all` included. The only optional key is `note`.
+
+**Store.** `~/.local/state/worker-jail/policies/<P>.<W>.json`, mode 0600, written by atomic rename. Deprovisioning keeps it; `policy rm` removes it.
+
+**Format.** Strict JSON (RFC 8259), UTF-8, at most 64 KiB. Rejected with `ErrPolicyInvalid`, whose message names the field path and the rule: comments, trailing commas, duplicate keys at any depth, `null`, unknown keys, missing keys, wrong types, NaN or Inf, a float where an integer is required (`2.0` for `pids`).
+Masks are Go RE2: each compiles on its own first (so `a)|(?:b` cannot break out of the anchors), is at most 256 bytes and at most 64 per list, and then matches as `^(?:mask)$`.
+`whitelist` and `blacklist` are accepted as exact aliases of the network modes `allowlist` and `denylist` and normalised before validation and before the id.
+The policy id is the sha256 hex of the canonical form (aliases normalised, keys sorted, no whitespace), so reformatting keeps it.
+
+| field | rule | enforced by |
+| --- | --- | --- |
+| `version` | `1` | jail |
+| `project`, `worker` | names as in section 6; must equal the target of `policy set` | jail |
+| `note` | optional, at most 200 bytes; required in practice for HIGH | none |
+| `tools.mode` | `allowlist` (with `allow`: 1..16 unique names from `read_file`, `search`, `write_file`, `apply_patch`, `bash`; and `settings`: exactly one entry per allowed tool with all its keys) or `yolo` (no `allow`, no `settings`) | harness |
+| `workspace.access` | `read-write` or `read-only`: the mount mode of `/work` in every `run` | jail |
+| `workspace.write_scope` | unique repository-relative prefixes (section 8), nothing under `.git`, or `["*"]` alone; `[]` with `read-only` | apply |
+| `network` | `none` (nothing else), `modules`, `allowlist`, `denylist`, `all` with their keys, ports and `rate`; any mode but `none` needs an exec tool (`bash` or `yolo`); `modules` needs `read-write` | jail (v2.0: only `none`) |
+| `limits` | `cpus` 0.25..4, `memory_mib` 256..8192, `pids` 16..4096, `call_timeout_s` 1..3600, `max_output_bytes` 1024..67108864, `disk_soft_mib` 64..65536 (soft, via `usage`) | jail; disk: harness |
+
+**Effective risk.** `policy check` prints the level, its reasons and warnings, and the id. The level is the cell below, raised by the modifiers; `yolo` counts as an exec tool and never lowers a level, and a read-only workspace never lowers a networked level.
+
+| network | read-write and an exec tool | read-only or no exec tool |
+| --- | --- | --- |
+| `none` | MEDIUM | LOW |
+| `modules` | MEDIUM; HIGH if a module mask matches a canary path | (invalid) |
+| `allowlist` | HIGH; CRITICAL if a host mask matches a canary host | same |
+| `denylist`, `all` | CRITICAL | CRITICAL |
+
+A host mask that admits `github.com`, `googleapis.com`, `githubusercontent.com`, `amazonaws.com` or `huggingface.co`, or that has an unescaped `.`, adds a warning, not a level.
+
+**Lifecycle.**
+- `policy set` validates, checks the target, refuses CRITICAL without `--accept-risk CRITICAL` and HIGH without a `note` (`ErrRiskExceeded`), refuses network modes other than `none` until v2.1 (`ErrEgressUnavailable`), stores the file and prints its id and risk.
+- `provision` refuses without a stored policy and labels a new workspace with the policy's id and risk; an existing workspace is returned unchanged.
+- `run` fails closed before any container starts unless the stored policy exists and its id equals the workspace's label (section 6), then applies access and limits.
+- A policy change takes effect only by export, deprovision and provision again; there is no in-place adopt.
+- `apply --policy P.W` bounds the patch by the policy's `write_scope` (section 8).
+
+**CLI** (`policy check FILE [--json] [--max-risk L]`, `policy set --project P --worker W [--accept-risk CRITICAL] FILE`, `policy show P W [--json]`, `policy template reviewer|developer|yolo-offline --project P --worker W [--write-scope ...] [--go-modules ...]`, `policy rm P W`). Exit codes: 0 ok, 1 invalid policy, 2 usage, 3 not found, 4 risk above `--max-risk` or not accepted, 5 egress unavailable. `--json` prints `{"level", "reasons", "warnings", "policy_id"}`.
+
 ## Appendix A: reference container
 
 The jail creates every container with `docker create --rm -i` and runs it with `docker start -a -i`. The minimum flags:
@@ -258,5 +312,7 @@ The jail creates every container with `docker create --rm -i` and runs it with `
 -e HOME=/work/home -e TMPDIR=/tmp
 <image> timeout -s KILL <timeout + 5 s> <argv...>
 ```
+
+**v2.0:** for `run`, `--cpus`, `--memory`/`--memory-swap` and `--pids-limit` are the policy's `limits.cpus`, `limits.memory_mib` and `limits.pids`, `/work` is `readonly` when the policy's `workspace.access` is `read-only`, and the timeout is at most `limits.call_timeout_s`. These limits may exceed the defaults above, within the bounds of section 14. Every other flag is unchanged.
 
 `/tmp` is `exec` on purpose: `/work` is executable anyway, and Docker's default `noexec` breaks `go test`. Only named volumes are mounted; there is never a bind mount, `--privileged`, `--cap-add`, `--device`, or a host namespace. The limits above are the defaults; a caller may lower them, and raise them only up to the protocol maximums. The host kills a call at its timeout with `docker kill`. The in-container `timeout` is the backstop for when the host process has died.

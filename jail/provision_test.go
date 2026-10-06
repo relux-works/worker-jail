@@ -33,6 +33,8 @@ func TestProvisionFresh(t *testing.T) {
 	fd := newFakeDocker()
 	fd.onStart = provisionStart(t, 1, 0)
 	j := newTestJail(t, fd)
+	id := storePolicy(t, j, "p1", "w1", testPolicy("p1", "w1"))
+	storePolicy(t, j, "p1", "w2", testPolicy("p1", "w2"))
 	ws, err := j.Provision(context.Background(), ProvisionSpec{Ref: Ref{"p1", "w1"}, Repo: repo})
 	if err != nil {
 		t.Fatal(err)
@@ -43,6 +45,9 @@ func TestProvisionFresh(t *testing.T) {
 	l := fd.volumes["wj.p1.w1"]
 	if l[LabelBase] != head || l[LabelKind] != KindWorkspace || l[LabelWorker] != "w1" || l[LabelCreated] == "" {
 		t.Fatalf("labels %v", l)
+	}
+	if l[LabelPolicyID] != id || l[LabelPolicyRisk] != "MEDIUM" || ws.PolicyID != id || ws.Risk != "MEDIUM" {
+		t.Fatalf("policy labels %v, ws %+v", l, ws)
 	}
 	argv := fd.starts[0].argv()
 	if argv[0] != "sh" || argv[4] != head || argv[5] != "w1" || argv[6] != "w1@p1.worker-jail.invalid" {
@@ -95,6 +100,7 @@ func TestProvisionDoctorFailure(t *testing.T) {
 	} {
 		fd := newFakeDocker()
 		j := newTestJail(t, fd)
+		storePolicy(t, j, "p1", "w1", testPolicy("p1", "w1"))
 		breakIt(fd, j)
 		if _, err := j.Provision(context.Background(), ProvisionSpec{Ref: Ref{"p1", "w1"}, Repo: repo}); !errors.Is(err, ErrDoctor) {
 			t.Fatalf("err %v", err)
@@ -110,6 +116,7 @@ func TestProvisionFailedCloneRemovesVolume(t *testing.T) {
 	fd := newFakeDocker()
 	fd.onStart = provisionStart(t, 1, 128)
 	j := newTestJail(t, fd)
+	storePolicy(t, j, "p1", "w1", testPolicy("p1", "w1"))
 	_, err := j.Provision(context.Background(), ProvisionSpec{Ref: Ref{"p1", "w1"}, Repo: newRepo(t)})
 	if err == nil || !strings.Contains(err.Error(), "clone failed") {
 		t.Fatalf("err %v", err)
@@ -126,6 +133,7 @@ func TestProvisionRefusesBadRefs(t *testing.T) {
 	for _, ref := range []string{head, "--all", "nope"} {
 		fd := newFakeDocker()
 		j := newTestJail(t, fd)
+		storePolicy(t, j, "p1", "w1", testPolicy("p1", "w1"))
 		_, err := j.Provision(context.Background(), ProvisionSpec{Ref: Ref{"p1", "w1"}, Repo: repo, RefName: ref})
 		if err == nil {
 			t.Fatalf("ref %q accepted", ref)

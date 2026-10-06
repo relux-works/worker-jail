@@ -359,3 +359,46 @@ func TestApplyNilScope(t *testing.T) {
 		t.Fatalf("err %v report %+v", err, rep)
 	}
 }
+
+// The policy's write_scope intersects --write-scope: a path must be inside both. ["*"] is the whole
+// repository and [] refuses every path. scopePatch touches Makefile and jail/x_test.go.
+func TestApplyPolicyScope(t *testing.T) {
+	scope := func(s ...string) *[]string { return &s }
+	cases := []struct {
+		task   []string
+		policy *[]string
+		out    int // paths reported out of scope; 0 means the patch applies
+	}{
+		{nil, scope("*"), 0},                                           // ["*"] alone admits everything
+		{nil, scope(), 2},                                              // [] refuses every path
+		{[]string{"Makefile", "jail/"}, scope(), 2},                    // [] refuses even inside the task scope
+		{nil, scope("jail/"), 1},                                       // the policy scope alone restricts
+		{[]string{"Makefile"}, scope("jail/"), 2},                      // disjoint scopes: nothing is inside both
+		{[]string{"Makefile", "jail/"}, scope("jail/"), 1},             // the policy narrows the task scope
+		{[]string{"jail/"}, scope("*"), 1},                             // ["*"] does not widen the task scope
+		{[]string{"Makefile", "jail/"}, scope("Makefile", "jail/"), 0}, // inside both
+		{[]string{"Makefile", "jail/"}, scope("*"), 0},                 // the task scope inside ["*"]
+		{nil, nil, 0}, // no policy: the v1.1 behaviour
+	}
+	for i, c := range cases {
+		repo := newRepo(t)
+		rep, err := Apply(context.Background(), repo, bytes.NewReader(scopePatch(t, repo)), ApplyOptions{WriteScope: c.task, PolicyScope: c.policy})
+		if c.out == 0 {
+			if err != nil || len(rep.OutOfScope) != 0 || !exists(filepath.Join(repo, "Makefile")) {
+				t.Errorf("case %d: err %v report %+v", i, err, rep)
+			}
+			continue
+		}
+		if !errors.Is(err, ErrOutOfScope) || len(rep.OutOfScope) != c.out || git(t, repo, "status", "--porcelain") != "" {
+			t.Errorf("case %d: err %v out %v", i, err, rep.OutOfScope)
+		}
+	}
+	// A malformed policy scope is refused before the repo is touched; .git stays ErrGitPath first even with [].
+	if _, err := Apply(context.Background(), "/nonexistent", bytes.NewReader(nil), ApplyOptions{PolicyScope: scope("../x")}); err == nil || !strings.Contains(err.Error(), "policy") {
+		t.Errorf("malformed policy scope: %v", err)
+	}
+	repo := newRepo(t)
+	if _, err := Apply(context.Background(), repo, strings.NewReader(gitHookPatch), ApplyOptions{PolicyScope: scope()}); !errors.Is(err, ErrGitPath) {
+		t.Errorf("gate order changed: %v", err)
+	}
+}

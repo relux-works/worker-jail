@@ -40,8 +40,12 @@ func (c *cappedWriter) Write(p []byte) (int, error) {
 var killWait = 30 * time.Second
 
 // call runs one container: slots, create, start -a -i, caps, kill. stdout goes to out (capped at maxOut).
+// s.Limits is set only by Run (from the policy); a zero value takes the jail's limits.
 func (j *Jail) call(ctx context.Context, s callSpec, stdin io.Reader, out io.Writer, maxOut int) (res Result, _ []byte, err error) {
-	s.Name, s.Image, s.Limits = newCallName(), j.image, j.limits
+	s.Name, s.Image = newCallName(), j.image
+	if s.Limits == (Limits{}) {
+		s.Limits = j.limits
+	}
 	args, err := createArgs(s)
 	if err != nil {
 		return res, nil, err

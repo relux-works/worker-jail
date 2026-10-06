@@ -61,14 +61,16 @@ j, err := jail.New(jail.Config{Image: "rwh-worker:dev"})       // no docker call
 if _, err := j.Doctor(ctx); err != nil { return err }            // at harness startup: ErrDoctor → start no jailed worker
 
 ref := jail.Ref{Project: "myproj", Worker: "w-7f3a"}           // [a-z0-9][a-z0-9-]{0,31}
-ws, err := j.Provision(ctx, jail.ProvisionSpec{Ref: ref, Repo: projectDir, RefName: "main"})
+pol, err := j.LoadPolicy(ref)                                   // v2.0: stored by the operator (`policy set`); ErrNoPolicy → no worker
+expose(pol.Tools); audit(pol.ID(), jail.EffectiveRisk(pol).Level) // tool exposure is the harness's layer (protocol section 14)
+ws, err := j.Provision(ctx, jail.ProvisionSpec{Ref: ref, Repo: projectDir, RefName: "main"}) // labels the workspace with pol.ID()
 err = j.SeedGoMod(ctx, ref.Project, projectDir, "main")        // Go projects; additive, per project
 
 // per tool call
 res, err := j.Run(ctx, ref, jail.RunSpec{
 	Argv: []string{"/opt/rwh/rwh-tool"}, Stdin: bytes.NewReader(req),
-	Timeout: toolTimeout + 30*time.Second,                       // rwh's callGrace
-})
+	Timeout: toolTimeout + 30*time.Second,                       // rwh's callGrace; at most the policy's call_timeout_s
+})                                                              // read-only mount and cpus/memory/pids come from the policy
 rr := tools.RunResult{Stdout: res.Stdout, Stderr: res.Stderr, Exit: res.Exit, TimedOut: res.TimedOut, Truncated: res.Truncated}
 audit(res.QueueWait, res.Duration, len(res.Stdout), len(res.Stderr))
 
@@ -97,6 +99,11 @@ that survives the turn for `Export` and `Deprovision`, so an interrupted turn is
 | `ErrDirty` | `apply` target has changes or untracked files. | Use a fresh worktree at base. |
 | `ErrGitPath` | The patch touches a `.git` path. | Reject the patch outright; it is hostile. |
 | `ErrReviewRequired` | Flagged paths (CI, hooks, agent files, symlinks, gitlinks); CLI exit 4. | Read every flagged hunk; only then re-run with `--allow-review-required`, or reject. |
+| `ErrNoPolicy` | No stored policy for (P, W) (v2.0). Provision and Run refuse; nothing is created. | Ask the operator for a policy (`worker-jail policy set`); never write one from worker input. |
+| `ErrPolicyChanged` | The stored policy's id differs from the workspace's label, or the workspace predates v2.0. Run refuses. | Export, deprovision, provision again (re-provision adopts the new policy). |
+| `ErrEgressUnavailable` | The policy's `network.mode` is not `none`; egress arrives in v2.1. CLI exit 5. | Use `network.mode: none` until v2.1. |
+| `ErrPolicyInvalid` | A policy breaks a rule; the message names the field and the rule. `policy` CLI exit 1. | Fix the file and review it like code. |
+| `ErrRiskExceeded` | `policy check --max-risk` exceeded, or `policy set` of CRITICAL without `--accept-risk CRITICAL` or HIGH without a `note`. CLI exit 4. | A decision for the operator, not the harness. |
 | `Result.TimedOut` | The call hit its timeout and was killed (CLI exit 124). | Report a timed-out tool call to the model. |
 | `Result.Truncated` | Output exceeded MaxOutput; the call was killed. | rwh treats it as a failed call. |
 | context cancelled | The host killed the container (`docker kill`); the in-container `timeout` is the backstop. | Record the call as interrupted; still export the turn. |

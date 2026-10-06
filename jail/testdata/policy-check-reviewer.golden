@@ -1,0 +1,7 @@
+tools      allowlist: read_file search  (no exec tool)
+workspace  read-only; apply accepts nothing
+network    none: no socket, no egress (as v1)
+limits     1 CPU, 1024 MiB, 256 pids, 300 s, out 4 MiB, disk 2048 MiB soft
+risk       LOW
+reason     none: no egress; read-only workspace or no exec tool (LOW)
+policy id  212d3ff5ae779dfefa07c818a9d448fe632c367e772e3b29c52c3841dcd2092c (sha256 canonical)

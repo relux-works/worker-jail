@@ -14,9 +14,24 @@ import (
 // ApplyOptions tunes Apply.
 // WriteScope lists repository-relative path prefixes the patch may touch: an entry ending in "/"
 // is a directory, any other entry an exact file. Nil or empty means no restriction.
+// PolicyScope, when non-nil, is the write_scope of the producing worker's policy: ["*"] is the whole
+// repository and [] refuses every path. With both, a path must be inside both (authority only narrows).
 type ApplyOptions struct {
 	AllowReviewRequired bool
 	WriteScope          []string
+	PolicyScope         *[]string
+}
+
+// inScope reports whether path is inside the task's and the policy's write scopes.
+func (o ApplyOptions) inScope(path string) bool {
+	if len(o.WriteScope) > 0 && !inWriteScope(o.WriteScope, path) {
+		return false
+	}
+	if o.PolicyScope != nil {
+		ps := *o.PolicyScope
+		return len(ps) == 1 && ps[0] == "*" || inWriteScope(ps, path)
+	}
+	return true
 }
 
 // Flag is a path that needs explicit review.
@@ -60,6 +75,11 @@ func Apply(ctx context.Context, repo string, patch io.Reader, o ApplyOptions) (A
 	if err := validateWriteScope(o.WriteScope); err != nil {
 		return rep, err
 	}
+	if ps := o.PolicyScope; ps != nil && !(len(*ps) == 1 && (*ps)[0] == "*") {
+		if err := validateWriteScope(*ps); err != nil {
+			return rep, fmt.Errorf("%w (policy)", err)
+		}
+	}
 	if p := gitPathInHeaders(data); p != "" {
 		return rep, fmt.Errorf("%w: %q", ErrGitPath, p)
 	}
@@ -100,7 +120,7 @@ func Apply(ctx context.Context, repo string, patch io.Reader, o ApplyOptions) (A
 		if isGitPath(path) {
 			return rep, fmt.Errorf("%w: %q", ErrGitPath, path)
 		}
-		if len(o.WriteScope) > 0 && !inWriteScope(o.WriteScope, path) {
+		if !o.inScope(path) {
 			rep.OutOfScope = append(rep.OutOfScope, path)
 		}
 		if meta[1] == "120000" {

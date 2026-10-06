@@ -27,6 +27,9 @@ const (
 	LabelCache   = LabelRoot + ".cache"
 	LabelBase    = LabelRoot + ".base"
 	LabelCreated = LabelRoot + ".created"
+	// LabelPolicyID and LabelPolicyRisk record the policy a workspace was provisioned under (v2.0).
+	LabelPolicyID   = LabelRoot + ".policy-id"
+	LabelPolicyRisk = LabelRoot + ".policy-risk"
 
 	KindWorkspace = "workspace"
 	KindCache     = "cache"
@@ -56,6 +59,12 @@ var (
 	ErrReviewRequired = errors.New("patch touches review-required paths")
 	ErrOutOfScope     = errors.New("patch touches paths outside the write scope")
 	ErrDoctor         = errors.New("doctor checks failed")
+
+	ErrPolicyInvalid     = errors.New("invalid policy")
+	ErrNoPolicy          = errors.New("no stored policy")
+	ErrPolicyChanged     = errors.New("stored policy differs from the workspace's")
+	ErrEgressUnavailable = errors.New("egress unavailable: network modes other than none arrive in v2.1")
+	ErrRiskExceeded      = errors.New("policy risk above the accepted level")
 )
 
 // Limits are per-call resource limits. Zero fields take the defaults.
@@ -136,7 +145,7 @@ func New(cfg Config) (*Jail, error) {
 	if l.CPUs < 0 || l.Memory < 0 || l.Tmp < 0 || l.FileSize < 0 || l.Pids < 0 || l.NoFile < 0 {
 		return nil, errors.New("jail: negative limit")
 	}
-	for _, sub := range []string{"", "slots", "locks", "exports", "docker-config"} {
+	for _, sub := range []string{"", "slots", "locks", "exports", "policies", "docker-config"} {
 		if err := os.MkdirAll(filepath.Join(j.state, sub), 0o700); err != nil {
 			return nil, fmt.Errorf("jail: state dir: %w", err)
 		}
@@ -199,9 +208,10 @@ func tail(b []byte) string {
 // Workspace describes a provisioned workspace.
 type Workspace struct {
 	Ref
-	Volume, Base string
-	Created      time.Time
-	Existed      bool
+	Volume, Base   string
+	PolicyID, Risk string // from the labels; empty for a workspace provisioned before v2.0
+	Created        time.Time
+	Existed        bool
 }
 
 // ProvisionSpec is the input of Provision.

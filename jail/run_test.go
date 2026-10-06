@@ -123,6 +123,7 @@ func TestRunRejectsBeforeCreate(t *testing.T) {
 	fd := newFakeDocker()
 	addWorkspace(fd, "p1", "w1", strings.Repeat("a", 40))
 	j := newTestJail(t, fd)
+	storePolicy(t, j, "p1", "nope", testPolicy("p1", "nope"))
 	ctx := context.Background()
 	cases := []struct {
 		ref  Ref

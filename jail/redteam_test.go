@@ -232,6 +232,7 @@ func rtName(prefix string) string {
 }
 
 func (e *rtEnv) provision(r Ref) Ref {
+	vmPolicy(e.t, e.j, r)
 	if _, err := e.j.Provision(e.ctx, ProvisionSpec{Ref: r, Repo: e.repo}); err != nil {
 		e.t.Fatalf("provision %v: %v", r, err)
 	}
@@ -650,6 +651,7 @@ for i in 1 2 3 4; do timeout 3 sh -c 'while :; do :; done' & done; wait; b=$(u);
 				if err != nil {
 					return nil, err
 				}
+				vmPolicy(e.t, j, e.a)
 				var wg sync.WaitGroup
 				var mu sync.Mutex
 				var ws []time.Duration
@@ -742,7 +744,13 @@ for i in 1 2 3 4; do timeout 3 sh -c 'while :; do :; done' & done; wait; b=$(u);
 			if out, err := build.CombinedOutput(); err != nil {
 				e.t.Fatalf("build: %v %s", err, out)
 			}
-			cmd := exec.Command(bin, "--state-dir", e.t.TempDir(), "--image", rtImage, "run", "--project", e.p, "--worker", e.a.Worker,
+			sd := e.t.TempDir()
+			sj, err := New(Config{StateDir: sd, Image: rtImage})
+			if err != nil {
+				e.t.Fatal(err)
+			}
+			vmPolicy(e.t, sj, e.a) // the CLI's fresh state dir needs the policy the workspace was provisioned under
+			cmd := exec.Command(bin, "--state-dir", sd, "--image", rtImage, "run", "--project", e.p, "--worker", e.a.Worker,
 				"--timeout", "5s", "--", "sleep", "600")
 			if err := cmd.Start(); err != nil {
 				e.t.Fatal(err)
@@ -796,6 +804,7 @@ for i in 1 2 3 4; do timeout 3 sh -c 'while :; do :; done' & done; wait; b=$(u);
 			if err != nil {
 				e.t.Fatal(err)
 			}
+			vmPolicy(e.t, j, e.a)
 			_, out := e.jrunWith(j, e.a, time.Minute, "env")
 			bad := regexp.MustCompile(`(?m)^[^=]*(TOKEN|SECRET|SSH_|A2A_|DOCKER_)[^=]*=|WJRT-CANARY`).FindAllString(out, -1)
 			row.Jailed = rtOutcome{len(bad) == 0 && strings.Contains(out, "HOME=/work/home"), "env: " + ev(strings.Join(splitLines(out), " "))}
@@ -812,6 +821,7 @@ for i in 1 2 3 4; do timeout 3 sh -c 'while :; do :; done' & done; wait; b=$(u);
 			if err != nil {
 				e.t.Fatal(err)
 			}
+			vmPolicy(e.t, j, e.a)
 			_, out := e.jrunWith(j, e.a, time.Minute, "env | grep -i proxy; echo end")
 			row.Jailed = rtOutcome{!strings.Contains(strings.ToLower(out), "http_proxy"), ev(out)}
 			d := DockerCLI{Env: []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"), "DOCKER_HOST=" + Endpoint(e.home), "DOCKER_CONFIG=" + dc}}

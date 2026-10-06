@@ -240,6 +240,7 @@ func fixtureMounts(t *testing.T) string {
 	return string(b)
 }
 
+// newTestJail builds a jail on fd and stores testPolicy for every workspace already added to fd.
 func newTestJail(t *testing.T, fd *fakeDocker) *Jail {
 	t.Helper()
 	j, err := New(Config{StateDir: t.TempDir(), Slots: 2, ProjectSlots: 1, Docker: fd, Colima: fakeColima{mounts: fixtureMounts(t)}})
@@ -247,12 +248,46 @@ func newTestJail(t *testing.T, fd *fakeDocker) *Jail {
 		t.Fatal(err)
 	}
 	j.home = fixtureHome
+	for _, l := range fd.volumes {
+		if l[LabelKind] == KindWorkspace {
+			storePolicy(t, j, l[LabelProject], l[LabelWorker], testPolicy(l[LabelProject], l[LabelWorker]))
+		}
+	}
 	return j
 }
 
+// testPolicy is a valid policy for p.w that keeps the v1 call shape: yolo, read-write, network none,
+// the default limits and the protocol's maximum timeout.
+func testPolicy(p, w string) []byte {
+	return []byte(`{"version":1,"project":"` + p + `","worker":"` + w + `","tools":{"mode":"yolo"},
+ "workspace":{"access":"read-write","write_scope":["*"]},"network":{"mode":"none"},
+ "limits":{"cpus":2,"memory_mib":2048,"pids":512,"call_timeout_s":3600,"max_output_bytes":4194304,"disk_soft_mib":4096}}`)
+}
+
+func policyID(t *testing.T, data []byte) string {
+	t.Helper()
+	p, err := ParsePolicy(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p.ID()
+}
+
+// storePolicy writes data as p.w's stored policy directly (bypassing SetPolicy's refusals) and returns its id.
+func storePolicy(t *testing.T, j *Jail, p, w string, data []byte) string {
+	t.Helper()
+	if err := writeAtomic(j.policyPath(Ref{p, w}), data); err != nil {
+		t.Fatal(err)
+	}
+	return policyID(t, data)
+}
+
+// addWorkspace adds a workspace labelled with testPolicy's id.
 func addWorkspace(fd *fakeDocker, p, w, base string) {
+	sum, _ := ParsePolicy(testPolicy(p, w))
 	fd.volumes[WorkspaceVolume(p, w)] = map[string]string{LabelRoot: "1", LabelKind: KindWorkspace,
-		LabelProject: p, LabelWorker: w, LabelBase: base, LabelCreated: "2026-09-29T10:00:00Z"}
+		LabelProject: p, LabelWorker: w, LabelBase: base, LabelCreated: "2026-09-29T10:00:00Z",
+		LabelPolicyID: sum.ID(), LabelPolicyRisk: "MEDIUM"}
 }
 
 func addCache(fd *fakeDocker, p, name string) {

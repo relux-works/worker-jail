@@ -1,8 +1,9 @@
-// Command worker-jail is the CLI of the worker-jail protocol v1 (docs/protocol.md).
+// Command worker-jail is the CLI of the worker-jail protocol (docs/protocol.md), v2.0 policy included.
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -24,9 +26,9 @@ const usage = `usage: worker-jail [--image IMG] [--state-dir DIR] [--slots N] [-
 commands:
   doctor
   provision   --project P --worker W --repo PATH [--ref REF]
-  run         --project P --worker W [--timeout 10m] [--max-output 4194304] -- ARGV...
+  run         --project P --worker W [--timeout D] [--max-output B] -- ARGV...   (defaults and maximums: the policy's)
   export      --project P --worker W [-o FILE]
-  apply       --repo PATH [--write-scope P1,P2,...] [--allow-review-required] PATCH
+  apply       --repo PATH [--write-scope P1,P2,...] [--policy P.W] [--allow-review-required] PATCH
   deprovision --project P --worker W [--force]
   seed-cache  --project P --name NAME   (tar on stdin)
   seed-gomod  --project P --repo PATH [--ref REF]
@@ -34,6 +36,14 @@ commands:
   ls          [--project P]
   kill        [--project P] [--worker W]
   purge       --project P
+  policy check FILE [--json] [--max-risk LOW|MEDIUM|HIGH|CRITICAL]
+  policy set --project P --worker W [--accept-risk CRITICAL] FILE
+  policy show P W [--json]
+  policy template reviewer|developer|yolo-offline --project P --worker W [--write-scope P1,P2,...] [--go-modules MASK ...]
+  policy rm P W
+
+policy exit codes: 0 ok, 1 invalid policy, 2 usage, 3 not found, 4 risk above --max-risk or not accepted,
+5 egress unavailable (network modes other than none arrive in v2.1; also from provision and run).
 `
 
 type usageError struct{ msg string }
@@ -70,7 +80,10 @@ func run(ctx context.Context, args []string, stdin *os.File, stdout, stderr io.W
 	}
 	cmd, rest := g.Arg(0), g.Args()[1:]
 	if cmd == "apply" {
-		return report(stderr, cmdApply(ctx, rest, stdout, stderr))
+		return report(stderr, cmdApply(ctx, cfg, rest, stdout, stderr))
+	}
+	if cmd == "policy" {
+		return reportPolicy(stderr, cmdPolicy(ctx, cfg, rest, stdout, stderr))
 	}
 	j, err := jail.New(cfg)
 	if err != nil {
@@ -104,6 +117,9 @@ func report(stderr io.Writer, err error) int {
 		return 2
 	case errors.Is(err, flag.ErrHelp):
 		return 2
+	case errors.Is(err, jail.ErrEgressUnavailable):
+		fmt.Fprintf(stderr, "worker-jail: %v\n", err)
+		return 5
 	case errors.Is(err, jail.ErrOutOfScope):
 		fmt.Fprintf(stderr, "worker-jail: %v\n", err)
 		return 5
@@ -143,6 +159,25 @@ func (f *flags) parse(args []string, need ...string) error {
 	if err := f.Parse(args); err != nil {
 		return usageError{err.Error()}
 	}
+	return f.require(need...)
+}
+
+// parseMixed parses flags that may follow positional arguments and returns the positionals.
+func (f *flags) parseMixed(args []string, need ...string) ([]string, error) {
+	var pos []string
+	for {
+		if err := f.Parse(args); err != nil {
+			return nil, usageError{err.Error()}
+		}
+		if args = f.Args(); len(args) == 0 {
+			break
+		}
+		pos, args = append(pos, args[0]), args[1:]
+	}
+	return pos, f.require(need...)
+}
+
+func (f *flags) require(need ...string) error {
 	for _, n := range need {
 		if fl := f.Lookup(n); fl == nil || fl.Value.String() == "" {
 			return usageError{"--" + n + " is required"}
@@ -190,8 +225,8 @@ func isTerminal(f *os.File) bool {
 
 func (c *cli) run(ctx context.Context, args []string) (int, error) {
 	f := newFlags("run", c.stderr).withRef()
-	timeout := f.Duration("timeout", jail.DefaultTimeout, "call timeout (max 60m)")
-	maxOut := f.Int("max-output", jail.DefaultMaxOutput, "stdout/stderr cap in bytes")
+	timeout := f.Duration("timeout", 0, "call timeout (0: the policy's call_timeout_s, which is also the maximum)")
+	maxOut := f.Int("max-output", 0, "stdout/stderr cap in bytes (0: the policy's max_output_bytes, also the maximum)")
 	if err := f.parse(args, "project", "worker"); err != nil {
 		return 0, err
 	}
@@ -209,13 +244,20 @@ func (c *cli) run(ctx context.Context, args []string) (int, error) {
 		return 0, err
 	}
 	if res.Truncated {
-		fmt.Fprintf(c.stderr, "worker-jail: output exceeded %d bytes; call killed\n", *maxOut)
+		fmt.Fprintf(c.stderr, "worker-jail: output exceeded %s; call killed\n", orPolicy(*maxOut != 0, fmt.Sprintf("%d bytes", *maxOut), "max_output_bytes"))
 	}
 	if res.TimedOut {
-		fmt.Fprintf(c.stderr, "worker-jail: timed out after %v\n", *timeout)
+		fmt.Fprintf(c.stderr, "worker-jail: timed out after %s\n", orPolicy(*timeout != 0, timeout.String(), "call_timeout_s"))
 		return 124, nil
 	}
 	return res.Exit, nil
+}
+
+func orPolicy(set bool, value, field string) string {
+	if set {
+		return value
+	}
+	return "the policy's " + field
 }
 
 func (c *cli) export(ctx context.Context, args []string) (int, error) {
@@ -247,9 +289,10 @@ func (c *cli) export(ctx context.Context, args []string) (int, error) {
 	return 0, nil
 }
 
-func cmdApply(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+func cmdApply(ctx context.Context, cfg jail.Config, args []string, stdout, stderr io.Writer) error {
 	f := newFlags("apply", stderr)
 	repo := f.String("repo", "", "clean target worktree")
+	policy := f.String("policy", "", "PROJECT.WORKER whose stored policy's write_scope also bounds the patch")
 	allow := f.Bool("allow-review-required", false, "apply flagged paths after reading every flagged hunk")
 	var scope []string
 	f.Func("write-scope", "comma-separated path prefixes the patch may touch (dir/ or file); repeatable", func(v string) error {
@@ -262,12 +305,28 @@ func cmdApply(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	if f.NArg() != 1 {
 		return usageError{"apply needs exactly one PATCH file"}
 	}
+	opts := jail.ApplyOptions{AllowReviewRequired: *allow, WriteScope: scope}
+	if *policy != "" {
+		project, worker, ok := strings.Cut(*policy, ".")
+		if !ok {
+			return usageError{"--policy takes PROJECT.WORKER"}
+		}
+		j, err := jail.New(cfg)
+		if err != nil {
+			return err
+		}
+		pol, err := j.LoadPolicy(jail.Ref{Project: project, Worker: worker})
+		if err != nil {
+			return err
+		}
+		opts.PolicyScope = &pol.Workspace.WriteScope
+	}
 	p, err := os.Open(f.Arg(0))
 	if err != nil {
 		return err
 	}
 	defer p.Close()
-	rep, err := jail.Apply(ctx, *repo, p, jail.ApplyOptions{AllowReviewRequired: *allow, WriteScope: scope})
+	rep, err := jail.Apply(ctx, *repo, p, opts)
 	for _, pth := range rep.OutOfScope {
 		fmt.Fprintf(stderr, "out of scope: %s\n", pth)
 	}
@@ -375,4 +434,210 @@ func (c *cli) purge(ctx context.Context, args []string) (int, error) {
 		return 0, err
 	}
 	return 0, c.j.Purge(ctx, *project)
+}
+
+// reportPolicy maps the policy commands' errors to their exit codes; the rest are as for every command.
+func reportPolicy(stderr io.Writer, err error) int {
+	switch {
+	case errors.Is(err, jail.ErrPolicyInvalid):
+		fmt.Fprintf(stderr, "worker-jail: %v\n", err)
+		return 1
+	case errors.Is(err, jail.ErrRiskExceeded):
+		fmt.Fprintf(stderr, "worker-jail: %v\n", err)
+		return 4
+	}
+	return report(stderr, err)
+}
+
+func cmdPolicy(ctx context.Context, cfg jail.Config, args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return usageError{"policy needs check, set, show, template or rm"}
+	}
+	switch args[0] {
+	case "check":
+		return policyCheck(args[1:], stdout, stderr)
+	case "template":
+		return policyTemplate(args[1:], stdout, stderr)
+	case "set", "show", "rm":
+	default:
+		return usageError{fmt.Sprintf("unknown policy command %q", args[0])}
+	}
+	j, err := jail.New(cfg)
+	if err != nil {
+		return err
+	}
+	switch args[0] {
+	case "set":
+		return policySet(ctx, j, args[1:], stdout, stderr)
+	case "show":
+		return policyShow(j, args[1:], stdout, stderr)
+	}
+	f := newFlags("policy rm", stderr)
+	pos, err := f.parseMixed(args[1:])
+	if err != nil {
+		return err
+	}
+	if len(pos) != 2 {
+		return usageError{"policy rm needs P W"}
+	}
+	return j.RemovePolicy(jail.Ref{Project: pos[0], Worker: pos[1]})
+}
+
+// readPolicyFile reads at most one byte more than a policy may hold, so the size check still fires.
+func readPolicyFile(path string) ([]byte, error) {
+	fh, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer fh.Close()
+	return io.ReadAll(io.LimitReader(fh, jail.PolicyMaxBytes+1))
+}
+
+func writeJSON(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
+}
+
+func policyCheck(args []string, stdout, stderr io.Writer) error {
+	f := newFlags("policy check", stderr)
+	asJSON := f.Bool("json", false, "print {level, reasons, warnings, policy_id}")
+	maxRisk := f.String("max-risk", "", "exit 4 when the level is above LOW, MEDIUM, HIGH or CRITICAL")
+	pos, err := f.parseMixed(args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 1 {
+		return usageError{"policy check needs exactly one FILE"}
+	}
+	var limit jail.Risk
+	if *maxRisk != "" {
+		if limit, err = jail.ParseRisk(*maxRisk); err != nil {
+			return usageError{err.Error()}
+		}
+	}
+	data, err := readPolicyFile(pos[0])
+	if err != nil {
+		return err
+	}
+	p, err := jail.ParsePolicy(data)
+	if err != nil {
+		return err
+	}
+	r := jail.EffectiveRisk(p)
+	if *asJSON {
+		err = writeJSON(stdout, r)
+	} else {
+		_, err = io.WriteString(stdout, jail.FormatPolicyCheck(p, r))
+	}
+	if err != nil {
+		return err
+	}
+	if limit != 0 && r.Level > limit {
+		return fmt.Errorf("%w: %s is above --max-risk %s", jail.ErrRiskExceeded, r.Level, limit)
+	}
+	return nil
+}
+
+func policySet(ctx context.Context, j *jail.Jail, args []string, stdout, stderr io.Writer) error {
+	f := newFlags("policy set", stderr).withRef()
+	accept := f.String("accept-risk", "", "CRITICAL: store a CRITICAL policy")
+	pos, err := f.parseMixed(args, "project", "worker")
+	if err != nil {
+		return err
+	}
+	if len(pos) != 1 {
+		return usageError{"policy set needs exactly one FILE"}
+	}
+	var o jail.SetPolicyOptions
+	switch *accept {
+	case "":
+	case "CRITICAL":
+		o.AcceptRisk = jail.RiskCritical
+	default:
+		return usageError{"--accept-risk takes only CRITICAL"}
+	}
+	data, err := readPolicyFile(pos[0])
+	if err != nil {
+		return err
+	}
+	sp, err := j.SetPolicy(ctx, f.ref(), data, o)
+	if err != nil {
+		return err
+	}
+	for _, w := range sp.Risk.Warnings {
+		fmt.Fprintf(stderr, "warning: %s\n", w)
+	}
+	fmt.Fprintf(stdout, "%s.%s id=%s risk=%s\n", sp.Policy.Project, sp.Policy.Worker, sp.Policy.ID(), sp.Risk.Level)
+	return nil
+}
+
+func policyShow(j *jail.Jail, args []string, stdout, stderr io.Writer) error {
+	f := newFlags("policy show", stderr)
+	asJSON := f.Bool("json", false, "print the stored policy, its id and its risk as JSON")
+	pos, err := f.parseMixed(args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 2 {
+		return usageError{"policy show needs P W"}
+	}
+	sp, err := j.ShowPolicy(jail.Ref{Project: pos[0], Worker: pos[1]})
+	if err != nil {
+		return err
+	}
+	if *asJSON {
+		canon, err := jail.CanonicalPolicy(sp.Raw)
+		if err != nil {
+			return err
+		}
+		return writeJSON(stdout, struct {
+			Path   string          `json:"path"`
+			Policy json.RawMessage `json:"policy"`
+			jail.RiskReport
+		}{sp.Path, canon, sp.Risk})
+	}
+	fmt.Fprint(stdout, jail.FormatPolicyCheck(sp.Policy, sp.Risk))
+	fmt.Fprintf(stdout, "%-10s %s\n", "stored", sp.Path)
+	stdout.Write(sp.Raw)
+	if len(sp.Raw) > 0 && sp.Raw[len(sp.Raw)-1] != '\n' {
+		fmt.Fprintln(stdout)
+	}
+	return nil
+}
+
+func policyTemplate(args []string, stdout, stderr io.Writer) error {
+	f := newFlags("policy template", stderr).withRef()
+	var scope, modules []string
+	f.Func("write-scope", "comma-separated path prefixes apply accepts (developer); repeatable", func(v string) error {
+		scope = append(scope, strings.Split(v, ",")...)
+		return nil
+	})
+	f.Func("go-modules", "one module mask per flag (developer); repeatable", func(v string) error {
+		modules = append(modules, v)
+		return nil
+	})
+	pos, err := f.parseMixed(args, "project", "worker")
+	if err != nil {
+		return err
+	}
+	if len(pos) != 1 {
+		return usageError{"policy template needs exactly one NAME (" + strings.Join(jail.Templates, ", ") + ")"}
+	}
+	switch {
+	case !slices.Contains(jail.Templates, pos[0]):
+		return usageError{fmt.Sprintf("unknown template %q (%s)", pos[0], strings.Join(jail.Templates, ", "))}
+	case pos[0] == "developer" && (len(scope) == 0 || len(modules) == 0):
+		return usageError{"template developer needs --write-scope and --go-modules"}
+	case pos[0] != "developer" && (len(scope) > 0 || len(modules) > 0):
+		return usageError{"template " + pos[0] + " takes no --write-scope or --go-modules"}
+	}
+	data, err := jail.PolicyTemplate(jail.TemplateSpec{Name: pos[0], Project: *f.project, Worker: *f.worker,
+		WriteScope: scope, GoModules: modules})
+	if err != nil {
+		return err
+	}
+	_, err = stdout.Write(data)
+	return err
 }

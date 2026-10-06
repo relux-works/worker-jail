@@ -21,17 +21,18 @@ const (
 // callSpec describes one container. Mounts are expressed only as names;
 // volume names are derived here, so no other mount can be built.
 type callSpec struct {
-	Shape   shape
-	Name    string // wj-call-<16 hex>
-	Project string
-	Worker  string   // call and read-only shapes
-	Cache   string   // seed shape: the cache being seeded
-	Caches  []string // call shape: caches mounted read-only
-	Workdir string   // "/work" or "/work/src"
-	Image   string
-	Limits  Limits
-	Timeout time.Duration
-	Argv    []string
+	Shape    shape
+	Name     string // wj-call-<16 hex>
+	Project  string
+	Worker   string   // call and read-only shapes
+	ReadOnly bool     // call shape: mount the workspace read-only (policy workspace.access)
+	Cache    string   // seed shape: the cache being seeded
+	Caches   []string // call shape: caches mounted read-only
+	Workdir  string   // "/work" or "/work/src"
+	Image    string
+	Limits   Limits
+	Timeout  time.Duration
+	Argv     []string
 }
 
 var callNameRE = regexp.MustCompile(`^wj-call-[0-9a-f]{16}$`)
@@ -68,6 +69,9 @@ func createArgs(s callSpec) ([]string, error) {
 		}
 		a = append(a, "--label", LabelWorker+"="+s.Worker)
 		mount = "type=volume,src=" + WorkspaceVolume(s.Project, s.Worker) + ",dst=/work"
+		if s.ReadOnly && s.Shape == shapeCall {
+			mount += ",readonly"
+		}
 		if s.Shape == shapeReadOnly {
 			mount += ",readonly"
 			if len(s.Caches) > 0 {
@@ -88,7 +92,7 @@ func createArgs(s callSpec) ([]string, error) {
 		if err := ValidName(s.Cache); err != nil {
 			return nil, err
 		}
-		if s.Worker != "" || len(s.Caches) > 0 {
+		if s.Worker != "" || len(s.Caches) > 0 || s.ReadOnly {
 			return nil, fmt.Errorf("jail: seed call mounts only its cache")
 		}
 		mount = "type=volume,src=" + CacheVolume(s.Project, s.Cache) + ",dst=/work"

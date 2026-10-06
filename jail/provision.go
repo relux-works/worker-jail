@@ -65,9 +65,14 @@ func resolveBase(ctx context.Context, repo, refName string) (base, fullref strin
 }
 
 // Provision creates and clones a workspace, or returns the existing one.
+// It refuses without a stored policy and labels a new workspace with the policy's id and risk.
 func (j *Jail) Provision(ctx context.Context, s ProvisionSpec) (Workspace, error) {
 	ws := Workspace{Ref: s.Ref, Volume: WorkspaceVolume(s.Project, s.Worker)}
 	if err := s.Ref.validate(); err != nil {
+		return ws, err
+	}
+	pol, err := j.servedPolicy(s.Ref)
+	if err != nil {
 		return ws, err
 	}
 	unlock, err := j.lockPath(ctx, "ws."+s.Project+"."+s.Worker)
@@ -92,6 +97,7 @@ func (j *Jail) Provision(ctx context.Context, s ProvisionSpec) (Workspace, error
 			return ws, fmt.Errorf("%w: %s (exit %d: %s)", ErrIncomplete, ws.Volume, res.Exit, tail(errb))
 		}
 		ws.Existed, ws.Base = true, labels[LabelBase]
+		ws.PolicyID, ws.Risk = labels[LabelPolicyID], labels[LabelPolicyRisk]
 		ws.Created, _ = time.Parse(time.RFC3339, labels[LabelCreated])
 		return ws, nil
 	}
@@ -106,8 +112,10 @@ func (j *Jail) Provision(ctx context.Context, s ProvisionSpec) (Workspace, error
 		return ws, fmt.Errorf("jail: ref %q resolves to a raw sha; RefName must be a branch, a tag or HEAD", s.RefName)
 	}
 	created := time.Now().UTC().Truncate(time.Second)
+	risk := EffectiveRisk(pol).Level.String()
 	if err := j.volumeCreate(ctx, ws.Volume, LabelRoot+"=1", LabelKind+"="+KindWorkspace, LabelProject+"="+s.Project,
-		LabelWorker+"="+s.Worker, LabelBase+"="+base, LabelCreated+"="+created.Format(time.RFC3339)); err != nil {
+		LabelWorker+"="+s.Worker, LabelBase+"="+base, LabelCreated+"="+created.Format(time.RFC3339),
+		LabelPolicyID+"="+pol.ID(), LabelPolicyRisk+"="+risk); err != nil {
 		return ws, err
 	}
 	if err := j.cloneInto(ctx, s, base, fullref); err != nil {
@@ -116,7 +124,7 @@ func (j *Jail) Provision(ctx context.Context, s ProvisionSpec) (Workspace, error
 		j.dockerOut(rmCtx, nil, "volume", "rm", "-f", ws.Volume)
 		return ws, err
 	}
-	ws.Base, ws.Created = base, created
+	ws.Base, ws.Created, ws.PolicyID, ws.Risk = base, created, pol.ID(), risk
 	return ws, nil
 }
 
