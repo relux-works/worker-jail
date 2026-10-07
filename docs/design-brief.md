@@ -9,7 +9,7 @@ may reach the model provider. Everything a worker writes is untrusted until revi
   Colima's default profile mounts the owner's home into the VM, so a container escape there would reach it.
 - **Workspace**: a separate clone or worktree of the project per worker (or a named volume holding the clone). **Never the live checkout.**
 - **Changes leave only as a patch or git bundle.** The host applies it after review with hooks disabled (`core.hooksPath=/dev/null`). Orchestrators never run
-  worker-produced code (Makefile, hooks, go generate, tests) outside an equivalent jail.
+  worker-produced code (Makefile, hooks, go generate, tests) outside an equivalent workplace.
 - **Container hardening**: `--network none` by default; `--cap-drop ALL`; `--security-opt no-new-privileges`; non-root user; read-only root FS; tmpfs `/tmp`;
   `--cpus`, `--memory`, `--pids-limit`; a size limit on the workspace.
 - **Execution path**: the harness stays on the host. It holds the worker's Matrix token, the audit log and the model connection. It runs each `item/tool/call` inside the
@@ -20,7 +20,7 @@ may reach the model provider. Everything a worker writes is untrusted until revi
 ## Out of scope for v1 (keep it simple)
 macOS-only builds (Xcode/iOS). Later: a separate macOS user plus Seatbelt, or a macOS VM. Seatbelt is never the primary boundary.
 
-## Acceptance: red-team suite, run as the worker, where every probe must FAIL (with the blocking layer recorded), plus positive controls where it succeeds without the jail
+## Acceptance: red-team suite, run as the worker, where every probe must FAIL (with the blocking layer recorded), plus positive controls where it succeeds without the workplace
 Read the host's `~/.ssh`, `~/.config/a2a-swarm`, keychain, other repos; write outside the workspace; symlink/hardlink/mount escapes; network egress (curl, nc, DNS);
 persistence beyond the session; privilege escalation; fork bomb, disk fill, memory blow-up; planting hooks or Makefile targets for the orchestrator;
 exfiltrating secrets through tool output. Also: container-to-VM escape surfaces nothing of the owner's home.

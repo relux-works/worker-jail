@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/relux-works/worker-jail/jail"
+	"github.com/relux-works/remote-workplace/workplace"
 )
 
 // limiter enforces one worker's network.rate: a token bucket of requests_per_min (burst: one minute's worth),
@@ -12,7 +12,7 @@ import (
 // service, so a reload changes the limits but never resets what was spent.
 type limiter struct {
 	mu     sync.Mutex
-	rate   jail.RatePolicy
+	rate   workplace.RatePolicy
 	tokens float64
 	last   time.Time
 	conns  int64
@@ -20,12 +20,12 @@ type limiter struct {
 	bytes  int64
 }
 
-func newLimiter(r jail.RatePolicy, now time.Time) *limiter {
+func newLimiter(r workplace.RatePolicy, now time.Time) *limiter {
 	return &limiter{rate: r, tokens: float64(r.RequestsPerMin), last: now, day: now.UTC().Format(time.DateOnly)}
 }
 
 // setRate adopts a reloaded policy's limits; the bucket is clipped to the new burst.
-func (l *limiter) setRate(r jail.RatePolicy) {
+func (l *limiter) setRate(r workplace.RatePolicy) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.rate = r

@@ -3,3 +3,6 @@
 .temp
 .task-board
 bin
+.codex/hooks.json
+.claude/settings.local.json
+task-board.config.json

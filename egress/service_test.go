@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/relux-works/worker-jail/jail"
+	"github.com/relux-works/remote-workplace/workplace"
 )
 
 // modulesPolicy is a valid modules policy for p.w with the given masks and rate.
@@ -142,7 +142,7 @@ type env struct {
 // with the real upstream client minus the dial guard (the upstream is on loopback); the guard has its own tests.
 func newEnv(t *testing.T) *env {
 	t.Helper()
-	root, err := os.MkdirTemp("", "wje")
+	root, err := os.MkdirTemp("", "rwpe")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func (e *env) roundTrip(c net.Conn, raw string) reply {
 	}
 	b, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	return reply{resp.StatusCode, resp.Header.Get("X-Worker-Jail-Denied"), string(b), resp.Header, resp.Close}
+	return reply{resp.StatusCode, resp.Header.Get("X-Remote-Workplace-Denied"), string(b), resp.Header, resp.Close}
 }
 
 func get(path string) string { return "GET " + path + " HTTP/1.1\r\nHost: 127.0.0.1:3128\r\n\r\n" }
@@ -233,7 +233,7 @@ func TestServiceModules(t *testing.T) {
 		{"/gomod/sumdb/sum.golang.org/tile/8/0/000", "tile"},
 	}
 	for _, a := range allowed {
-		r := e.do("p.w", "GET "+a.path+" HTTP/1.1\r\nHost: 127.0.0.1:3128\r\nAuthorization: Bearer WJ-CANARY-AUTH\r\nX-Canary: WJ-CANARY-HDR\r\n\r\n")
+		r := e.do("p.w", "GET "+a.path+" HTTP/1.1\r\nHost: 127.0.0.1:3128\r\nAuthorization: Bearer RWP-CANARY-AUTH\r\nX-Canary: RWP-CANARY-HDR\r\n\r\n")
 		if r.status != 200 || r.body != a.body || r.denied != "" {
 			t.Errorf("%s: %d %q %q", a.path, r.status, r.denied, r.body)
 		}
@@ -277,7 +277,7 @@ func TestServiceModules(t *testing.T) {
 	}
 	for _, d := range denied {
 		r := e.do("p.w", d.raw)
-		if r.status != 403 || r.denied != d.code || !strings.HasPrefix(r.body, "worker-jail egress: denied ("+d.code+")") ||
+		if r.status != 403 || r.denied != d.code || !strings.HasPrefix(r.body, "remote-workplace egress: denied ("+d.code+")") ||
 			!strings.Contains(r.body, d.name) || strings.Count(r.body, "\n") != 1 || strings.Contains(r.body, `golang\.org`) {
 			t.Errorf("%.60q: %d %q %q", d.raw, r.status, r.denied, r.body)
 		}
@@ -342,7 +342,7 @@ func TestServiceSockets(t *testing.T) {
 
 func policyIDOf(t *testing.T, data []byte) string {
 	t.Helper()
-	p, err := jail.ParsePolicy(data)
+	p, err := workplace.ParsePolicy(data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -643,7 +643,7 @@ func TestFailClosed(t *testing.T) {
 		{"p.other", string(defaultPolicy("p", "elsewhere"))},
 		{"p.v2", strings.Replace(string(defaultPolicy("p", "v2")), `"version":1`, `"version":2`, 1)},
 	} {
-		if _, err := jail.ParsePolicy([]byte(c.data)); err != nil && c.key != "p.v2" && c.key != "p.other" {
+		if _, err := workplace.ParsePolicy([]byte(c.data)); err != nil && c.key != "p.v2" && c.key != "p.other" {
 			t.Fatalf("%s fixture: %v", c.key, err)
 		}
 		e.put(c.key, []byte(c.data))
@@ -729,12 +729,12 @@ func TestPanicKeepsListener(t *testing.T) {
 // Every request logs exactly the fields of egress.md §5 as one JSON line, and never a header or a body.
 func TestLogFields(t *testing.T) {
 	e := newEnv(t)
-	e.up.routes["/proxy/golang.org/x/text/@v/v0.14.0.info"] = text(200, "WJ-CANARY-BODY")
+	e.up.routes["/proxy/golang.org/x/text/@v/v0.14.0.info"] = text(200, "RWP-CANARY-BODY")
 	e.put("p.w", defaultPolicy("p", "w"))
 	e.s.Reload()
 	// A line is written when its exchange ends, which can be just after the client has read the response: wait for
 	// each line before the next request, so that the order is fixed.
-	e.do("p.w", "GET /gomod/golang.org/x/text/@v/v0.14.0.info HTTP/1.1\r\nHost: h\r\nX-Canary: WJ-CANARY-HDR\r\n\r\n")
+	e.do("p.w", "GET /gomod/golang.org/x/text/@v/v0.14.0.info HTTP/1.1\r\nHost: h\r\nX-Canary: RWP-CANARY-HDR\r\n\r\n")
 	waitLog(t, e, 1)
 	e.do("p.w", get("/gomod/github.com/evil/x/@v/list"))
 	lines := waitLog(t, e, 2)
@@ -757,13 +757,13 @@ func TestLogFields(t *testing.T) {
 	if a["project"] != "p" || a["worker"] != "w" || a["policy_id"] != policyIDOf(t, defaultPolicy("p", "w")) || a["mode"] != "modules" ||
 		a["handler"] != "modules" || a["method"] != "GET" || a["host"] != proxyHost || a["port"] != 443.0 ||
 		a["path"] != "/gomod/golang.org/x/text/@v/v0.14.0.info" || a["decision"] != "allow" || a["status"] != 200.0 ||
-		a["bytes_out"] != float64(len("WJ-CANARY-BODY")) || a["cache"] != "miss" || a["ip"] != "127.0.0.1" {
+		a["bytes_out"] != float64(len("RWP-CANARY-BODY")) || a["cache"] != "miss" || a["ip"] != "127.0.0.1" {
 		t.Errorf("allowed line %v", a)
 	}
 	if d["decision"] != "deny" || d["code"] != CodeModule || d["status"] != 403.0 {
 		t.Errorf("denied line %v", d)
 	}
-	if strings.Contains(e.log.String(), "WJ-CANARY") {
+	if strings.Contains(e.log.String(), "RWP-CANARY") {
 		t.Fatal("a header or body reached the log")
 	}
 }

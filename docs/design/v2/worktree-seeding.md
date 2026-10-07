@@ -1,4 +1,4 @@
-# Seeding from a dirty worktree and applying into a dirty target (worker-jail v2 design)
+# Seeding from a dirty worktree and applying into a dirty target (remote-workplace v2 design)
 
 Status: design, not normative. Elaborates `docs/research/worktree-seeding-draft.md` under D3 of `docs/decisions/2026-09-29-v2-direction.md` (the seeding gap that forced Seatbelt in `rwh run` v1). The paused code is on the local branch `feat/v2-worktree`; this document does not depend on reading it.
 Tags: **Decided (source)** or **Proposed**. Baseline: `docs/protocol.md` §6 (provision, seed-gomod, apply) and §8.
@@ -23,7 +23,7 @@ The source is never written: no index refresh, no object, no ref.
 
 ### Base, result and idempotence
 - The workspace's base is the snapshot commit, so `export` holds only the worker's delta. **Proposed** (it follows from `export` diffing against the base label, `docs/protocol.md` §6).
-- `Provision` returns `Base`, `SnapshotTree`, `SnapshotParent` (HEAD at snapshot time) and `Existed`, and stores them as labels `ai.relux.worker-jail.snapshot-tree` and `...snapshot-parent`. `ls` shows them.
+- `Provision` returns `Base`, `SnapshotTree`, `SnapshotParent` (HEAD at snapshot time) and `Existed`, and stores them as labels `ai.relux.remote-workplace.snapshot-tree` and `...snapshot-parent`. `ls` shows them.
 - Idempotent like v1: an existing workspace is returned unchanged with `Existed=true`, whatever the worktree looks like now. A caller that wants a fresh snapshot deprovisions first; it compares `SnapshotTree` to detect the difference.
 
 ## 2. Secret guard (Proposed; extends the draft)
@@ -49,12 +49,12 @@ Purpose: import a patch (computed against the snapshot) into the Story worktree 
   **Fix**: the draft built a temp index of the target and hashed its untracked files, which would pull unrelated secrets into an object store for no benefit and needed the guard. `apply --check` on the working tree already refuses a conflicting hunk and a new file that collides with an untracked one. The secret guard is not part of apply.
 - **Real apply**: `git -c core.hooksPath=/dev/null apply` (no `--index`, `--whitespace=nowarn`). The index, HEAD and refs are never written. The check and the apply are one atomic `git apply` per patch; a conflict refuses the whole patch and leaves the tree untouched. Never commits, never pushes. **Decided (protocol G8)**.
 - **Snapshot check** (optional): `--snapshot-tree OID` computes the target's current snapshot tree (temp object dir, discarded) and prints `target diverged since snapshot: N paths` when different. It informs the reviewer; it never blocks.
-- **Validation** of the result, in a jail: `provision --from-worktree` of the same worktree and run the tests (protocol §8 step 5). Worker code never runs on the host.
+- **Validation** of the result, in a workplace: `provision --from-worktree` of the same worktree and run the tests (protocol §8 step 5). Worker code never runs on the host.
 
 ## 5. rwh run integration
-- **Agreed** (in scope by D3; accepted by remote-worker-harness-2b in #worker-jail harness-integration): `rwh run --backend jail` moves from "a clean landed ref" to `FromWorktree`; the flag is unchanged. That removes the reason for Seatbelt in `rwh run` v1.
+- **Agreed** (in scope by D3; accepted by remote-worker-harness-2b in #remote-workplace harness-integration): `rwh run --backend workplace` moves from "a clean landed ref" to `FromWorktree`; the flag is unchanged. That removes the reason for Seatbelt in `rwh run` v1.
 - Flow (Proposed): `policy set` (or a policy file passed to rwh) → `provision --from-worktree` (secret guard) → `seed-gomod --from-worktree` when the project has a `gomod` cache → runs → `export` after every turn → the report carries `workspace.snapshot_tree` and the policy id/risk → orchestrator reviews → `apply --allow-dirty --policy P.W [--snapshot-tree OID]` into the same worktree.
-- rwh has no policy of its own to invent: no policy means no run (D2). rwh-side changes are out of scope here; the jail API above is the contract.
+- rwh has no policy of its own to invent: no policy means no run (D2). rwh-side changes are out of scope here; the workplace API above is the contract.
 
 ## 6. Tests and red-team probes (Proposed; from the draft's brief plus new ones)
 | area | test |

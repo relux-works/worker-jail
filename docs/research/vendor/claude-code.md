@@ -1,4 +1,4 @@
-# How Claude Code jails its own models: primary-source findings
+# How Claude Code workplaces its own models: primary-source findings
 
 Researched 2026-09-29. This is research only; no repository was changed.
 
@@ -126,7 +126,7 @@ Windows the enforcement primitives are Seatbelt, bubblewrap and a WFP filter key
   Defaults: network restriction is on **iff `allowedDomains` is defined** (an empty array means block all;
   sandbox-manager.ts:1736-1747). Before v0.0.16 an empty allowlist failed open (GHSA-9gqj-5w7c-vx47). A
   `--control-fd` lets the caller hot-update the config (README.md:187).
-- [F] **Credential masking** is directly relevant to worker-jail. With `credentials.envVars/files` in
+- [F] **Credential masking** is directly relevant to remote-workplace. With `credentials.envVars/files` in
   `mode:"mask"`, the sandbox sees `fake_value_<uuid4>` (length-matched), and the host proxy swaps sentinel→real in
   headers and bodies only for `injectHosts` (default: `allowedDomains`). The map lives only in memory
   (credential-sentinel.ts:1-9). It **requires `tlsTerminate`** (sandbox-config.ts:1447-1456), and plaintext inject is
@@ -253,9 +253,9 @@ Windows the enforcement primitives are Seatbelt, bubblewrap and a WFP filter key
   [SREF] but [SBX] Limitations omits that. The README says Linux has no violation reporting, but the code has a
   seccomp-notify monitor.
 
-## 8. Relevant to worker-jail
-**(a) Allowlisted egress proxy for jailed calls**
-- [F] The proxy runs outside the jail, and the only network path is a Unix socket (Linux) or localhost port (macOS).
+## 8. Relevant to remote-workplace
+**(a) Allowlisted egress proxy for workplace calls**
+- [F] The proxy runs outside the workplace, and the only network path is a Unix socket (Linux) or localhost port (macOS).
   Env vars are hints and the kernel/netns is the boundary. Per-session proxy auth tokens stop other local processes
   from riding the proxy.
 - [F] Match on the CONNECT authority / absolute-URI host, canonicalized. Deny list first, then allow, then
@@ -263,13 +263,13 @@ Windows the enforcement primitives are Seatbelt, bubblewrap and a WFP filter key
   Resolve once and dial the checked IP, blocking loopback, link-local, metadata and self addresses (add RFC1918
   yourself).
 - [F] Without TLS termination, a hostname allowlist does not stop domain fronting or exfil to broad hosts. srt's
-  answer is opt-in `tlsTerminate` + `filterRequest` (method/path policy) and an injected CA. [I] worker-jail should
+  answer is opt-in `tlsTerminate` + `filterRequest` (method/path policy) and an injected CA. [I] remote-workplace should
   either terminate TLS for policy hosts or accept that fronting is in scope. It should also avoid storage-like
   wildcards (the cloud Trusted list is an anti-example).
 - [F] Violations are returned in-band to the model (`<sandbox_violations>`, 403 with reason, `deniedDomainReasons`),
   which lets the agent adapt instead of retrying blindly. The Linux violation monitor is explicitly non-authoritative.
 - [F] Fail-open pitfalls seen in practice: an empty allowlist (GHSA-9gqj), missing deps meaning unsandboxed unless
-  `failIfUnavailable`, and seccomp absent meaning Unix sockets are open. [I] worker-jail should fail closed on all of
+  `failIfUnavailable`, and seccomp absent meaning Unix sockets are open. [I] remote-workplace should fail closed on all of
   them.
 **(b) Protected paths**
 - [F] Baseline write-deny set: shell rc files, `.gitconfig`, `.gitmodules`, `.git/hooks`, `.git/config`, `.mcp.json`,
@@ -277,7 +277,7 @@ Windows the enforcement primitives are Seatbelt, bubblewrap and a WFP filter key
   `~/.claude*`, and bare-repo `HEAD/objects/refs`. It applies at any depth, is case-insensitive, and covers paths that
   **don't exist yet** (the missed case in GHSA-ff64).
 - [F] Symlink/hard-link and worktree confusion are the recurring escape class, especially when a **privileged
-  host-side writer** later follows a path the jailed process shaped. [I] Any host-side component that writes into the
+  host-side writer** later follows a path the workplace process shaped. [I] Any host-side component that writes into the
   workspace (patch apply, artifact export) must resolve paths itself with no-follow semantics.
 **(c) Credentials injected outside the sandbox**
 - [F] Two first-party patterns: the cloud GitHub proxy (scoped session credential in the VM, swapped at the proxy,
@@ -285,14 +285,14 @@ Windows the enforcement primitives are Seatbelt, bubblewrap and a WFP filter key
   the proxy only for `injectHosts`, only over terminated TLS, and SigV4 re-signed). Cloud API keys are added "after each
   request leaves the session's VM".
 - [F] Caveats: masking fails open on extract/JWT mismatch by default (use `onExtractNoMatch:"deny"|"error"`). macOS
-  file masks become read-deny. Env vars set in a cloud environment are plain and readable. [I] worker-jail should
-  prefer the swap-at-proxy model and treat any secret in the jail env as exfiltratable.
+  file masks become read-deny. Env vars set in a cloud environment are plain and readable. [I] remote-workplace should
+  prefer the swap-at-proxy model and treat any secret in the workplace env as exfiltratable.
 **(d) Approvals**
 - [F] The sandbox replaces most approvals (auto-allow inside the boundary). Anything leaving the boundary
   (`dangerouslyDisableSandbox`, new domain, protected path) falls back to a prompt or classifier. Strict mode removes
   the escape hatch. Deny → ask → allow, and deny is final across scopes. Hooks can block (exit 2) but not override
   denies. Managed settings can lock rules, domains and read paths, but not `excludedCommands`.
-- [F] Bash text rules are explicitly not a security boundary. [I] worker-jail approvals should key on the enforced
+- [F] Bash text rules are explicitly not a security boundary. [I] remote-workplace approvals should key on the enforced
   effect (host, path, credential use), not on command strings, and new-domain approvals should be per-command or
   per-session rather than persisted into project-writable config (compare GHSA-ff64 and the settings-injection
   advisories).

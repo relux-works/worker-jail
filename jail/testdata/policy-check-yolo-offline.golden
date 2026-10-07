@@ -1,8 +1,0 @@
-tools      yolo: no tool rules; every harness tool, run in the jail
-workspace  read-write; apply accepts the whole repository
-network    none: no socket, no egress (as v1)
-limits     2 CPUs, 2048 MiB, 512 pids, 600 s, out 4 MiB, disk 4096 MiB soft
-risk       MEDIUM
-reason     none: no egress; read-write workspace with an exec tool can plant code in the patch (MEDIUM)
-reason     yolo: no tool rules
-policy id  666c4d466357c858a180ba681e7d56543bed9c8404bc888d28b022128a689147 (sha256 canonical)

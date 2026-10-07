@@ -1,4 +1,4 @@
-# wj-egress: one service for all network modes (worker-jail v2 design)
+# rwp-egress: one service for all network modes (remote-workplace v2 design)
 
 Status: design, not normative. Elaborates `docs/research/egress-proxy-design.md` (drafted per project) for the five modes of D1 (`docs/decisions/2026-09-29-v2-direction.md`).
 Tags: **Decided (source)** or **Proposed**. Policy fields: policy.md. Risks: threat-model-by-mode.md.
@@ -6,13 +6,13 @@ Tags: **Decided (source)** or **Proposed**. Policy fields: policy.md. Risks: thr
 ## 1. Shape
 - Calls keep `--network none`: only `lo`, no DNS, no route. **Decided (`docs/protocol.md` G2; D1 and D3 of the decision record add the modes, and `docs/research/vendor-sandboxes.md` verdict "adopt for v2" keeps the no-interface property)**.
 - The only way out is one Unix socket per worker, mounted read-only into the call. **Proposed** (the draft mounted one per project; per worker gives per-worker policy, limits, logs and G5 isolation).
-- One Go program, `cmd/wj-egress`, one container in the workers VM, serves every worker and every mode. **Proposed** (from the draft).
+- One Go program, `cmd/rwp-egress`, one container in the workers VM, serves every worker and every mode. **Proposed** (from the draft).
 
 ```
-call (--network none, lo only)                          wj-egress (workers VM, one container)
+call (--network none, lo only)                          rwp-egress (workers VM, one container)
   tool ─ HTTP(S)_PROXY / GOPROXY = 127.0.0.1:3128
-   └▶ socat 127.0.0.1:3128 ─▶ /run/wj/egress.sock ─────▶ listener of worker P.W ─▶ mode handler ─▶ dial guard ─▶ internet
-          (volume wj-egress-sock, subpath P.W, ro)
+   └▶ socat 127.0.0.1:3128 ─▶ /run/rwp/egress.sock ─────▶ listener of worker P.W ─▶ mode handler ─▶ dial guard ─▶ internet
+          (volume rwp-egress-sock, subpath P.W, ro)
 ```
 
 | mode | socket exists | handler enabled |
@@ -21,17 +21,17 @@ call (--network none, lo only)                          wj-egress (workers VM, o
 | `modules` | yes | modules only |
 | `allowlist`, `denylist`, `all` | yes | generic only |
 
-Mounting: `--mount type=volume,src=wj-egress-sock,dst=/run/wj,volume-subpath=<P>.<W>,readonly`. The draft verified this for a project directory on Docker 29 (uid 10001, read-only rootfs, no caps, no-new-privileges, connect works, other directories absent, `lo` only). Per-worker subpaths need the same verification (red-team probe E1). A missing subpath makes `docker create` fail: that is fail closed.
+Mounting: `--mount type=volume,src=rwp-egress-sock,dst=/run/rwp,volume-subpath=<P>.<W>,readonly`. The draft verified this for a project directory on Docker 29 (uid 10001, read-only rootfs, no caps, no-new-privileges, connect works, other directories absent, `lo` only). Per-worker subpaths need the same verification (red-team probe E1). A missing subpath makes `docker create` fail: that is fail closed.
 The socket directory is owned by the service (0755), the socket is 0666 in it. The mount is the capability; there is no token.
 
 ## 2. Service container (Proposed, from the draft)
 - `--read-only --cap-drop ALL --security-opt no-new-privileges`, non-root, memory and pids limits, `--log-driver local` with size limits.
 - Own Docker network with a public resolver (`--dns 1.1.1.1`; the VM resolver does not answer, red-team G2).
-- Volumes: `wj-egress-sock` (rw), `wj-egress-policy` (ro), `wj-egress-cache` (rw). None is mounted in a call except the worker's own socket subpath.
+- Volumes: `rwp-egress-sock` (rw), `rwp-egress-policy` (ro), `rwp-egress-cache` (rw). None is mounted in a call except the worker's own socket subpath.
 - Second layer (Proposed, open question 4): the egress network gets firewall rules in the VM that drop RFC1918, link-local and the gateway, so a guard bug does not reach host services. Host services behind the gateway (the Matrix homeserver, G2) are what the guard protects.
 - Exception to Appendix A of the protocol (this container needs a network): the protocol text must list it. Every other container keeps `--network none`.
-- Relay in the call: `socat TCP-LISTEN:3128,bind=127.0.0.1,fork UNIX-CONNECT:/run/wj/egress.sock`, started by the jail's argv wrapper before the tool (base image v2 adds `socat`). It is untrusted by design; it dies with the call (`--init`, container removal, G6). Alternative: a static `wj-relay` binary (open question 3).
-- Env set by the jail:
+- Relay in the call: `socat TCP-LISTEN:3128,bind=127.0.0.1,fork UNIX-CONNECT:/run/rwp/egress.sock`, started by the workplace's argv wrapper before the tool (base image v2 adds `socat`). It is untrusted by design; it dies with the call (`--init`, container removal, G6). Alternative: a static `rwp-relay` binary (open question 3).
+- Env set by the workplace:
 
 | mode | env |
 | --- | --- |
@@ -70,8 +70,8 @@ One HTTP/1.1 parser per listener, strict: header block at most 8 KiB, no request
 | control | rule |
 | --- | --- |
 | Dial guard | Resolve in the service (DNS exists only here; the call has none). Refuse if **any** answer is forbidden (stricter than the vendors' pick-the-safe-one), dial the checked IP, and re-check the peer address in the dialer's control hook. Forbidden: `0.0.0.0/8`, `10/8`, `100.64/10`, `127/8`, `169.254/16` (metadata), `172.16/12`, `192.0.0.0/24`, `192.168/16` (includes lima `192.168.5.0/24`), `198.18/15`, `224/4`, `240/4`, `::`, `::1`, `fc00::/7`, `fe80::/10`, `ff00::/8`. IPv4-mapped, NAT64 `64:ff9b::/96` and 6to4 `2002::/16` are unwrapped and re-checked. No field can change it. **Decided (D3, `docs/research/egress-proxy-design.md` §3)** for the list; the unwrap and any-answer rules Proposed |
-| Denials | In-band: `403`, header `X-Worker-Jail-Denied: <code>` and a one-line body naming the denied name, never the policy. Codes: `no-policy`, `mode`, `method`, `grammar`, `module`, `host`, `port`, `guard`, `rate`, `size`, `upstream`. **Decided (`docs/research/vendor-sandboxes.md` item 8)** |
-| Logs | JSON lines on stdout: `ts`, `project`, `worker`, `policy_id`, `mode`, `handler`, `method`, `host`, `port`, `path` (modules; plain HTTP: first 256 bytes plus length and sha256, query stripped), `decision`, `code`, `status`, `bytes_in`, `bytes_out`, `dur_ms`, `cache`, `ip`. Never bodies or headers. `worker-jail egress log [--project P] [--worker W] [--since D]` reads them (via `docker logs`) |
+| Denials | In-band: `403`, header `X-Remote-Workplace-Denied: <code>` and a one-line body naming the denied name, never the policy. Codes: `no-policy`, `mode`, `method`, `grammar`, `module`, `host`, `port`, `guard`, `rate`, `size`, `upstream`. **Decided (`docs/research/vendor-sandboxes.md` item 8)** |
+| Logs | JSON lines on stdout: `ts`, `project`, `worker`, `policy_id`, `mode`, `handler`, `method`, `host`, `port`, `path` (modules; plain HTTP: first 256 bytes plus length and sha256, query stripped), `decision`, `code`, `status`, `bytes_in`, `bytes_out`, `dur_ms`, `cache`, `ip`. Never bodies or headers. `remote-workplace egress log [--project P] [--worker W] [--since D]` reads them (via `docker logs`) |
 | Rate limits | Per worker from `network.rate`: token bucket on requests per minute, a concurrent-connection cap, `bytes_per_day` (resets 00:00 UTC). Exceeded: `403 rate` for every request form (one status only) |
 | Fail closed | Table below. **Decided as a rule (`docs/research/vendor-sandboxes.md` items 3, 4)** |
 
@@ -86,10 +86,10 @@ One HTTP/1.1 parser per listener, strict: header block at most 8 KiB, no request
 | log sink blocked for 5 s | new connections are refused until it recovers |
 
 ## 6. How policies reach the service (Proposed)
-1. `policy set` validates (policy.md) and stores the file host-side, then runs a hardened seeding call (same technique as `seed-cache`) that writes `<P>.<W>.json` into `wj-egress-policy` by atomic rename. The file holds only `project`, `worker`, `network`, the policy id.
-   **Implemented differently in v2.1 part A:** the whole policy file is written (it holds no secret), and the service validates it with the jail's own `ParsePolicy`, so the loaded id is exactly the host's policy id (`docs/protocol.md` section 7).
-2. It signals the service (`docker kill -s HUP wj-egress`). The service re-reads every file with the same validator package, opens or closes listeners and creates the worker's socket directory.
-3. `docker exec wj-egress wj-egress status <P.W>` prints the loaded id. `policy set` waits for it (exit 5 on timeout). `Run` compares the loaded id with the stored one before every network-enabled call (`ErrEgressUnavailable` otherwise), so a stale service can neither widen nor silently narrow access.
+1. `policy set` validates (policy.md) and stores the file host-side, then runs a hardened seeding call (same technique as `seed-cache`) that writes `<P>.<W>.json` into `rwp-egress-policy` by atomic rename. The file holds only `project`, `worker`, `network`, the policy id.
+   **Implemented differently in v2.1 part A:** the whole policy file is written (it holds no secret), and the service validates it with the workplace's own `ParsePolicy`, so the loaded id is exactly the host's policy id (`docs/protocol.md` section 7).
+2. It signals the service (`docker kill -s HUP rwp-egress`). The service re-reads every file with the same validator package, opens or closes listeners and creates the worker's socket directory.
+3. `docker exec rwp-egress rwp-egress status <P.W>` prints the loaded id. `policy set` waits for it (exit 5 on timeout). `Run` compares the loaded id with the stored one before every network-enabled call (`ErrEgressUnavailable` otherwise), so a stale service can neither widen nor silently narrow access.
 4. Removal: `deprovision` (or `policy rm`) removes the file; the listener and its cache namespace go on the next reload.
 5. Policy files are never writable from calls: the policy volume is not mounted in any call, and the sockets are mounted read-only.
 Operator commands `egress up|down|status|log` (Proposed, from the draft). `doctor` verifies the service's hardening whenever any worker has a network mode other than `none`.

@@ -1,3 +1,3 @@
-module github.com/relux-works/worker-jail
+module github.com/relux-works/remote-workplace
 
 go 1.25

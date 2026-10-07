@@ -1,4 +1,4 @@
-# worker-jail v2 design (elaboration)
+# remote-workplace v2 design (elaboration)
 
 Status: design only, written under `docs/decisions/2026-09-29-v2-direction.md` (D3: implementation waits). Nothing here changes `docs/protocol.md` v1.1. Every point in the documents is tagged **Decided (source)** or **Proposed**.
 
@@ -6,7 +6,7 @@ Status: design only, written under `docs/decisions/2026-09-29-v2-direction.md` (
 | --- | --- |
 | `policy.md` | per-worker policy: schema, validation, enforcing layers, tools and network modes, risk output, templates, CLI, lifecycle, errors, 3 examples |
 | `threat-model-by-mode.md` | per network mode and tools mode and the key combinations: attacker capability, contained, not contained, detection, risk |
-| `egress.md` | one `wj-egress` service for all modes: per-worker sockets, modules and generic handlers, dial guard, denials, logs, rate limits, fail closed, policy delivery, probes |
+| `egress.md` | one `rwp-egress` service for all modes: per-worker sockets, modules and generic handlers, dial guard, denials, logs, rate limits, fail closed, policy delivery, probes |
 | `worktree-seeding.md` | `provision --from-worktree`, snapshot technique, secret guard, `SeedGoModWorktree`, `apply --allow-dirty`, `SnapshotTree`, rwh run integration, tests |
 
 ## Decided (source)
@@ -51,9 +51,9 @@ Names and shapes of fields, bounds, the risk matrix, the CLI and its exit codes,
 ## Open questions for the owner
 1. Spelling: accept only `allowlist`/`denylist`, or also `whitelist`/`blacklist` as strict aliases?
 2. Cache: per worker (proposed, keeps G5) or shared per project (less disk, a timing channel between the project's workers)?
-3. Relay in the call: `socat` (draft) or a small static `wj-relay` binary (smaller surface)? And may `modules` be combined with a generic mode?
+3. Relay in the call: `socat` (draft) or a small static `rwp-relay` binary (smaller surface)? And may `modules` be combined with a generic mode?
 4. The second layer for egress (firewall on the egress network inside the VM): worth the operator step? It needs root in the VM only.
-5. Tool registry in the jail, plus restricting `argv[0]` to the fixed runner when no exec tool is allowed (a jail-side check of "no bash"): adopt?
+5. Tool registry in the workplace, plus restricting `argv[0]` to the fixed runner when no exec tool is allowed (a workplace-side check of "no bash"): adopt?
 6. Policy change on a live workspace: re-provision only (proposed), or an `adopt` that accepts strictly narrower policies?
 7. Risk thresholds: should `policy set` refuse CRITICAL without a flag like `--accept-risk CRITICAL`? Should HIGH require a recorded reason in `note`?
 8. Secret-guard override at HIGH or above: refuse (proposed) or allow with the flag?
@@ -61,7 +61,7 @@ Names and shapes of fields, bounds, the risk matrix, the CLI and its exit codes,
 10. `apply --allow-dirty` on the primary checkout: refuse by default (proposed)? The v1 "live checkout" test is not defined in the documents I read.
 11. Protocol version: land all of this as v2, or split (policy and seeding first, egress later)?
 
-## Design-owner decisions (m1max_worker-jail_orch, formerly worker-jail-72, 2026-09-29)
+## Design-owner decisions (m1max_remote-workplace_orch, formerly remote-workplace-72, 2026-09-29)
 The owner confirmed D1-D4 in the orchestrator's session and left the design to its owner. These answer the open questions above.
 
 | # | decision |
@@ -78,4 +78,4 @@ The owner confirmed D1-D4 in the orchestrator's session and left the design to i
 
 Still open:
 - 4, the VM-level firewall as a second egress layer: an operator step needing root in the VM; for the owner.
-- 5, a jail-side `argv[0]` check: it needs the harness's agreement; for remote-worker-harness-2b.
+- 5, a workplace-side `argv[0]` check: it needs the harness's agreement; for remote-worker-harness-2b.

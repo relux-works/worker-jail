@@ -1,7 +1,7 @@
 # Seeding from a dirty or unlanded worktree, and applying into a dirty target: design draft
 
 Status: a draft for the v2 elaboration (decision record 2026-09-29, D3); not normative.
-Why it exists: `rwh run --backend jail` needs a landed ref and a clean checkout. That is the only reason `rwh run` v1 uses Seatbelt (docs/decisions/2026-09-29-v2-direction.md).
+Why it exists: `rwh run --backend workplace` needs a landed ref and a clean checkout. That is the only reason `rwh run` v1 uses Seatbelt (docs/decisions/2026-09-29-v2-direction.md).
 A paused implementation exists on the local branch `feat/v2-worktree`.
 
 ## Provision from a worktree snapshot (`provision --from-worktree`)
@@ -24,10 +24,10 @@ A paused implementation exists on the local branch `feat/v2-worktree`.
   The same gates run: `.git` (hard), write scope (hard), then symlink, gitlink and review-required unless allowed.
 - **Real apply.** Plain `git apply` into the working tree only. The target's index is never written, and hooks are off.
   `git apply` is atomic: a conflict with edits made after the snapshot refuses the whole patch.
-- **Validation** of the result, in a jail: `provision --from-worktree` of that worktree, then run the tests.
+- **Validation** of the result, in a workplace: `provision --from-worktree` of that worktree, then run the tests.
 
 ## rwh integration
-`rwh run --backend jail` switches from "clean landed ref" to `FromWorktree` (remote-worker-harness-2b: "within a day of the landing"). The flag stays the same.
+`rwh run --backend workplace` switches from "clean landed ref" to `FromWorktree` (remote-worker-harness-2b: "within a day of the landing"). The flag stays the same.
 The patch comes back against the snapshot. The orchestrator imports it with `apply --allow-dirty --write-scope ...` into the same Story worktree.
 
 ## Tests to write (from the paused brief)

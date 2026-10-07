@@ -1,4 +1,4 @@
-# Per-worker policy: specification (worker-jail v2 design)
+# Per-worker policy: specification (remote-workplace v2 design)
 
 Status: design, not normative. Elaborates `docs/research/worker-policy.md` under `docs/decisions/2026-09-29-v2-direction.md` (D1, D2). Baseline: `docs/protocol.md` v1.1.
 Tags: **Decided (source)** is fixed by the owner or the protocol. **Proposed** is this document's choice, open to the owner.
@@ -12,16 +12,16 @@ Fixes to the draft are listed in README.md.
 
 | layer | meaning | strength |
 | --- | --- | --- |
-| jail | mounts, env, cgroups, ulimits, the egress socket (`docs/protocol.md` Appendix A) | boundary |
-| egress | `wj-egress` (see egress.md); enforces network fields | boundary |
-| apply | `worker-jail apply` on the host (`docs/protocol.md` §8) | boundary at extraction |
-| harness | tool exposure and per-tool settings in the harness. The jail sees only argv, so it cannot tell tools apart | strong for exposure, advisory for settings once an exec tool exists |
+| workplace | mounts, env, cgroups, ulimits, the egress socket (`docs/protocol.md` Appendix A) | boundary |
+| egress | `rwp-egress` (see egress.md); enforces network fields | boundary |
+| apply | `remote-workplace apply` on the host (`docs/protocol.md` §8) | boundary at extraction |
+| harness | tool exposure and per-tool settings in the harness. The workplace sees only argv, so it cannot tell tools apart | strong for exposure, advisory for settings once an exec tool exists |
 | advisory | shapes behaviour, contains nothing | none |
 
 ## 2. Format rules (Proposed)
 - Strict JSON (RFC 8259), UTF-8, at most 64 KiB. Rejected: comments, trailing commas, duplicate keys at any level, `null`, unknown keys, wrong types, NaN or Inf, a float where an integer is required.
 - Every key marked *req* must be present. The only optional key is `note`. Absent lists are errors; `[]` must be written out.
-- **Masks** are RE2 (Go `regexp`). A mask must compile on its own, at most 256 bytes, at most 64 per list. The jail then matches `^(?:mask)$`.
+- **Masks** are RE2 (Go `regexp`). A mask must compile on its own, at most 256 bytes, at most 64 per list. The workplace then matches `^(?:mask)$`.
   Compiling alone first blocks breakout such as `a)|(?:b`, which would un-anchor the wrapper (the draft wrapped without this check).
 - Host masks match the canonical host: lowercase, punycode, no trailing dot, no brackets on IPv6, no port. IP literals match as text.
 - Module masks match the unescaped module path. Path masks match the workspace-relative path with `/`. Command masks match the command string (advisory).
@@ -31,20 +31,20 @@ Fixes to the draft are listed in README.md.
 ## 3. Fields
 | field | type | req | rules | layer |
 | --- | --- | --- | --- | --- |
-| `version` | int | req | must be `1` (schema version) | jail |
-| `project`, `worker` | string | req | `[a-z0-9][a-z0-9-]{0,31}`; must equal the target of `policy set` | jail |
+| `version` | int | req | must be `1` (schema version) | workplace |
+| `project`, `worker` | string | req | `[a-z0-9][a-z0-9-]{0,31}`; must equal the target of `policy set` | workplace |
 | `note` | string | opt | at most 200 bytes; ignored | none |
 | `tools.mode` | `allowlist` \| `yolo` | req | see §4 | harness |
 | `tools.allow` | string[] | req if allowlist, absent if yolo | 1..16 unique names from the tool registry (§4) | harness |
 | `tools.settings` | object | req if allowlist, absent if yolo | one entry per allowed tool, no others; keys per §4 | harness / advisory |
-| `workspace.access` | `read-write` \| `read-only` | req | mount mode of `/work` in every Run | jail |
+| `workspace.access` | `read-write` \| `read-only` | req | mount mode of `/work` in every Run | workplace |
 | `workspace.write_scope` | string[] | req | see below | apply |
-| `network` | object | req | §5 | jail + egress |
-| `limits.cpus` | number | req | 0.25..4 | jail |
-| `limits.memory_mib` | int | req | 256..8192 (`/tmp` included) | jail |
-| `limits.pids` | int | req | 16..4096 | jail |
-| `limits.call_timeout_s` | int | req | 1..3600 (protocol maximum 60 min) | jail |
-| `limits.max_output_bytes` | int | req | 1024..67108864 | jail |
+| `network` | object | req | §5 | workplace + egress |
+| `limits.cpus` | number | req | 0.25..4 | workplace |
+| `limits.memory_mib` | int | req | 256..8192 (`/tmp` included) | workplace |
+| `limits.pids` | int | req | 16..4096 | workplace |
+| `limits.call_timeout_s` | int | req | 1..3600 (protocol maximum 60 min) | workplace |
+| `limits.max_output_bytes` | int | req | 1024..67108864 | workplace |
 | `limits.disk_soft_mib` | int | req | 64..65536; soft, checked through `usage` | harness |
 
 `write_scope`: repository-relative prefixes, a trailing `/` means a directory, otherwise an exact file. Rules: no leading `/`, no `..`, nothing under `.git`, unique.
@@ -55,8 +55,8 @@ Scope semantics **Decided (D4, `docs/protocol.md` §8)**: no override, review-re
 ## 4. Tools
 **Decided (D1)**: an allowlist mode, a yolo mode, per-tool extended settings.
 - `allowlist`: the harness exposes only the listed tools and refuses calls to others (`ErrToolNotAllowed`, harness side).
-- `yolo`: every tool the harness has, run inside the jail. The boundary does not change. `settings` must be absent (the draft ignored it silently; a silently ignored rule is a false comfort).
-- **Registry** (Proposed): `read_file`, `search`, `write_file`, `apply_patch`, `bash`. The jail ships the list; a new tool is a jail release. Unknown name: `ErrPolicyInvalid`.
+- `yolo`: every tool the harness has, run inside the workplace. The boundary does not change. `settings` must be absent (the draft ignored it silently; a silently ignored rule is a false comfort).
+- **Registry** (Proposed): `read_file`, `search`, `write_file`, `apply_patch`, `bash`. The workplace ships the list; a new tool is a workplace release. Unknown name: `ErrPolicyInvalid`.
 - **Exec tools**: `bash` and `yolo`. Without one, calls run only fixed tool runners.
 
 Settings (all keys of a present tool are required; write `[".*"]` to say "any"):
@@ -104,7 +104,7 @@ Modifiers: a module mask that matches a canary path raises `modules` to HIGH (a 
 `yolo` counts as exec with no rules; it never lowers a level. Reasons: host allowlists without TLS interception do not stop exfiltration or fronting (`docs/research/vendor-sandboxes.md`, item 5).
 
 ```
-$ worker-jail policy check policy.json
+$ remote-workplace policy check policy.json
 tools      allowlist: read_file search write_file apply_patch bash  (file settings advisory: bash present; bash masks advisory)
 workspace  read-write; apply accepts internal/ cmd/ docs/
 network    modules: 2 masks; read-only GET/HEAD; covert channel via module paths (rate-limited, logged)
@@ -115,7 +115,7 @@ policy id  9c1f...e2 (sha256 canonical)
 `--json` prints `{"level","reasons":[...],"warnings":[...],"policy_id"}`. `--max-risk LEVEL` exits 4 when exceeded. The level is stored in the workspace label, written to the harness audit log, and shown by `ls`.
 
 ## 7. Templates (Proposed)
-Templates are generators, not inheritance: `worker-jail policy template NAME --project P --worker W [--write-scope ...] [--go-modules ...]` prints a complete explicit file. What is stored is always the full file.
+Templates are generators, not inheritance: `remote-workplace policy template NAME --project P --worker W [--write-scope ...] [--go-modules ...]` prints a complete explicit file. What is stored is always the full file.
 
 | template | tools | workspace | network | limits |
 | --- | --- | --- | --- | --- |
@@ -127,7 +127,7 @@ Templates are generators, not inheritance: `worker-jail policy template NAME --p
 | command | effect |
 | --- | --- |
 | `policy check FILE [--json] [--max-risk L]` | validate, print effective risk; touches nothing |
-| `policy set --project P --worker W FILE` | check, store `~/.local/state/worker-jail/policies/P.W.json` (0600, atomic rename), push the network part to egress, print the id. Exit non-zero if egress does not confirm the id |
+| `policy set --project P --worker W FILE` | check, store `~/.local/state/remote-workplace/policies/P.W.json` (0600, atomic rename), push the network part to egress, print the id. Exit non-zero if egress does not confirm the id |
 | `policy show P W [--json]` | stored policy, id, risk, egress-confirmed id |
 | `policy template NAME ...` | print a template |
 Exit codes: 0 ok; 1 invalid policy; 2 usage; 3 not found; 4 above `--max-risk`; 5 egress not confirmed.
@@ -137,7 +137,7 @@ Exit codes: 0 ok; 1 invalid policy; 2 usage; 3 not found; 4 above `--max-risk`; 
 - **Run** reads the stored policy again. It fails closed (`ErrPolicyChanged`) if the id differs from the label, or (`ErrNoPolicy`) if the file is gone. For `network.mode != none` it also fails (`ErrEgressUnavailable`) unless egress confirms that it loaded the same id. Then it applies `access`, `limits`, env and the socket mount. Fail-closed Run and the egress check are Proposed (from `docs/research/worker-policy.md` §5).
 - **Adopting a change**: export, deprovision, provision again. There is no in-place adopt (open question 6).
 - **Apply**: `apply --policy P.W` takes `write_scope` from the producing worker's policy. With `--write-scope` also given, the effective scope is the intersection (authority only narrows; `docs/research/apiary-reconciliation.md` I2). Proposed protocol change to §6/§8.
-- **Harness**: reads the same file (`jail.LoadPolicy`), exposes tools, applies settings, logs the policy id and risk. Proposed addition to `docs/protocol.md` §9.
+- **Harness**: reads the same file (`workplace.LoadPolicy`), exposes tools, applies settings, logs the policy id and risk. Proposed addition to `docs/protocol.md` §9.
 - **Deprovision** removes the workspace; the stored policy stays until `policy rm` (Proposed) so that a later provision does not silently drop it.
 
 ## 10. Errors
@@ -153,7 +153,7 @@ Exit codes: 0 ok; 1 invalid policy; 2 usage; 3 not found; 4 above `--max-risk`; 
 ## 11. Examples
 Reviewer (LOW):
 ```json
-{"version":1,"project":"worker-jail","worker":"rev-1",
+{"version":1,"project":"remote-workplace","worker":"rev-1",
  "tools":{"mode":"allowlist","allow":["read_file","search"],
   "settings":{"read_file":{"paths":[".*"],"max_bytes":1048576},"search":{"paths":[".*"],"max_results":200}}},
  "workspace":{"access":"read-only","write_scope":[]},

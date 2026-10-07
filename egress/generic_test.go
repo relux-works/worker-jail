@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/relux-works/worker-jail/jail"
+	"github.com/relux-works/remote-workplace/workplace"
 )
 
 // genericPolicy is a valid generic policy for p.w: mode allowlist, denylist or all, host masks (nil for all), ports
@@ -42,7 +42,7 @@ func genericPolicy(p, w, mode string, hosts []string, ports any, rpm, conns, byt
 }
 
 func allowlist(p, w string, hosts []string, ports ...int) []byte {
-	return genericPolicy(p, w, jail.NetAllowlist, hosts, ports, 600, 64, 1<<30)
+	return genericPolicy(p, w, workplace.NetAllowlist, hosts, ports, 600, 64, 1<<30)
 }
 
 // genericEnv is env with the generic handlers' dial guard over a fake resolver. Every dial the guard lets through
@@ -150,7 +150,7 @@ func (g *genericEnv) open(key, raw string) (net.Conn, *bufio.Reader, reply) {
 	if err != nil {
 		g.t.Fatalf("read response to %.60q: %v", raw, err)
 	}
-	r := reply{status: resp.StatusCode, denied: resp.Header.Get("X-Worker-Jail-Denied"), header: resp.Header}
+	r := reply{status: resp.StatusCode, denied: resp.Header.Get("X-Remote-Workplace-Denied"), header: resp.Header}
 	if method != "CONNECT" || resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
 		r.body = string(b)
@@ -367,9 +367,9 @@ func TestGenericPorts(t *testing.T) {
 	g := newGenericEnv(t)
 	g.public("example.com")
 	g.put("p.allow", allowlist("p", "allow", []string{`example\.com`}, 8443))
-	g.put("p.deny", genericPolicy("p", "deny", jail.NetDenylist, []string{`evil\.io`}, "*", 600, 64, 1<<30))
-	g.put("p.all", genericPolicy("p", "all", jail.NetAll, nil, []int{443, 22}, 600, 64, 1<<30))
-	g.put("p.any", genericPolicy("p", "any", jail.NetAll, nil, "*", 600, 64, 1<<30))
+	g.put("p.deny", genericPolicy("p", "deny", workplace.NetDenylist, []string{`evil\.io`}, "*", 600, 64, 1<<30))
+	g.put("p.all", genericPolicy("p", "all", workplace.NetAll, nil, []int{443, 22}, 600, 64, 1<<30))
+	g.put("p.any", genericPolicy("p", "any", workplace.NetAll, nil, "*", 600, 64, 1<<30))
 	g.s.Reload()
 	for _, c := range []struct {
 		key, authority string
@@ -403,7 +403,7 @@ func TestGenericPorts(t *testing.T) {
 func TestDenylistDenyWins(t *testing.T) {
 	g := newGenericEnv(t)
 	g.public("api.evil.io", "evil.io", "github.com", "example.com", "notevil.io", "github.com.example.com")
-	g.put("p.w", genericPolicy("p", "w", jail.NetDenylist, []string{`(.*\.)?evil\.io`, `github\.com`, `nomatch\.example`}, "*", 600, 64, 1<<30))
+	g.put("p.w", genericPolicy("p", "w", workplace.NetDenylist, []string{`(.*\.)?evil\.io`, `github\.com`, `nomatch\.example`}, "*", 600, 64, 1<<30))
 	g.s.Reload()
 	for _, c := range []struct {
 		raw  string
@@ -445,7 +445,7 @@ func TestGenericGuard(t *testing.T) {
 	set("sixtofour.example", addrs("2002:c0a8:502::1"))
 	set("ula.example", addrs("fd00::1"))
 	set("public.example", addrs("93.184.216.34"))
-	g.put("p.w", genericPolicy("p", "w", jail.NetAll, nil, "*", 600, 64, 1<<30))
+	g.put("p.w", genericPolicy("p", "w", workplace.NetAll, nil, "*", 600, 64, 1<<30))
 	g.s.Reload()
 	for _, raw := range []string{
 		connectReq("loop.example:443"), connectReq("meta.example:80"), connectReq("lima.example:443"),
@@ -502,7 +502,7 @@ func TestPlainHTTPForwarding(t *testing.T) {
 	g.put("p.w", allowlist("p", "w", []string{`example\.com`, `other\.example`}, 80, 8080))
 	g.s.Reload()
 	raw := "GET http://Example.COM:8080/a/b?q=1&r=2 HTTP/1.1\r\nHost: example.com:8080\r\nUser-Agent: test\r\nAccept: */*\r\n" +
-		"X-Keep: yes\r\nProxy-Authorization: Basic WJ-CANARY\r\nProxy-Connection: keep-alive\r\nProxy-Foo: x\r\n" +
+		"X-Keep: yes\r\nProxy-Authorization: Basic RWP-CANARY\r\nProxy-Connection: keep-alive\r\nProxy-Foo: x\r\n" +
 		"Connection: keep-alive, X-Drop\r\nX-Drop: x\r\nKeep-Alive: 300\r\nTE: trailers\r\nUpgrade: websocket\r\nTrailer: X\r\n\r\n"
 	_, _, r := g.open("p.w", raw)
 	if r.status != 302 || r.header.Get("Location") != "http://elsewhere.example/" || r.body != "moved" {
@@ -570,7 +570,7 @@ func TestTunnelByteCap(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			g := newGenericEnv(t)
 			g.public("example.com")
-			g.put("p.w", genericPolicy("p", "w", jail.NetAllowlist, []string{`example\.com`}, []int{443}, 600, 64, c.budget))
+			g.put("p.w", genericPolicy("p", "w", workplace.NetAllowlist, []string{`example\.com`}, []int{443}, 600, 64, c.budget))
 			g.s.Reload()
 			conn, br, r := g.open("p.w", connectReq("example.com:443"))
 			if r.status != 200 || !tunnelEcho(conn, br, strings.Repeat("a", 512)) {
@@ -602,7 +602,7 @@ func TestTunnelTimeouts(t *testing.T) {
 	g := newGenericEnv(t)
 	g.s.idleTimeout = 600 * time.Millisecond
 	g.public("example.com")
-	g.put("p.w", genericPolicy("p", "w", jail.NetAll, nil, "*", 600, 64, 1<<30))
+	g.put("p.w", genericPolicy("p", "w", workplace.NetAll, nil, "*", 600, 64, 1<<30))
 	g.s.Reload()
 	stream := func(c net.Conn) { // streams until the tunnel is cut
 		for {
@@ -674,7 +674,7 @@ func TestGenericLogFields(t *testing.T) {
 	waitLog(t, g.env, 2)
 	g.setTarget(strings.TrimPrefix(up.URL, "http://"))
 	long := "/" + strings.Repeat("p", 300)
-	g.open("p.w", "GET http://example.com"+long+"?token=WJ-CANARY-QUERY HTTP/1.1\r\nHost: example.com\r\nX-Canary: WJ-CANARY-HDR\r\n\r\n")
+	g.open("p.w", "GET http://example.com"+long+"?token=RWP-CANARY-QUERY HTTP/1.1\r\nHost: example.com\r\nX-Canary: RWP-CANARY-HDR\r\n\r\n")
 	l := waitLog(t, g.env, 3)
 	if len(l) != 3 {
 		t.Fatalf("lines %v", l)
@@ -682,7 +682,7 @@ func TestGenericLogFields(t *testing.T) {
 	c, d, h := l[0], l[1], l[2]
 	if c["handler"] != handlerConnect || c["method"] != "CONNECT" || c["host"] != "example.com" || c["port"] != 443.0 ||
 		c["decision"] != "allow" || c["code"] != "" || c["status"] != 200.0 || c["path"] != "" || c["ip"] != "127.0.0.1" ||
-		c["end"] != endEOF || c["bytes_out"] != 3.0 || c["mode"] != jail.NetAllowlist {
+		c["end"] != endEOF || c["bytes_out"] != 3.0 || c["mode"] != workplace.NetAllowlist {
 		t.Errorf("CONNECT line %v", c)
 	}
 	if _, ok := c["path_len"]; ok {
@@ -696,7 +696,7 @@ func TestGenericLogFields(t *testing.T) {
 		h["path_sha256"] != hex.EncodeToString(sum[:]) || h["status"] != 200.0 || h["host"] != "example.com" || h["port"] != 80.0 {
 		t.Errorf("http line %v", h)
 	}
-	if strings.Contains(g.log.String(), "WJ-CANARY") || strings.Contains(g.log.String(), "token") {
+	if strings.Contains(g.log.String(), "RWP-CANARY") || strings.Contains(g.log.String(), "token") {
 		t.Fatal("a query or header reached the log")
 	}
 }
@@ -741,7 +741,7 @@ func TestGenericReload(t *testing.T) {
 func TestGenericMaxConns(t *testing.T) {
 	g := newGenericEnv(t)
 	g.public("example.com")
-	g.put("p.w", genericPolicy("p", "w", jail.NetAllowlist, []string{`example\.com`}, []int{443}, 600, 1, 1<<30))
+	g.put("p.w", genericPolicy("p", "w", workplace.NetAllowlist, []string{`example\.com`}, []int{443}, 600, 1, 1<<30))
 	g.s.Reload()
 	conn, _, r := g.open("p.w", connectReq("example.com:443"))
 	if r.status != 200 {

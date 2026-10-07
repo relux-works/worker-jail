@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/relux-works/worker-jail/jail"
+	"github.com/relux-works/remote-workplace/workplace"
 )
 
 // The routing table of egress.md §3 per mode (E2): in modules only origin-form GET and HEAD reach a handler, and
@@ -34,8 +34,8 @@ func TestRoute(t *testing.T) {
 		{"GET", "example.com:443", CodeMethod, CodeMethod},
 	}
 	for _, c := range cases {
-		for _, m := range []struct{ mode, want string }{{jail.NetModules, c.modules}, {jail.NetAllowlist, c.generic},
-			{jail.NetDenylist, c.generic}, {jail.NetAll, c.generic}, {jail.NetNone, CodeMode}, {"bogus", CodeMode}} {
+		for _, m := range []struct{ mode, want string }{{workplace.NetModules, c.modules}, {workplace.NetAllowlist, c.generic},
+			{workplace.NetDenylist, c.generic}, {workplace.NetAll, c.generic}, {workplace.NetNone, CodeMode}, {"bogus", CodeMode}} {
 			h, code := route(m.mode, &Request{Method: c.method, Target: c.target})
 			got := h + code
 			if got != m.want || h != "" && code != "" {
@@ -141,7 +141,7 @@ func TestMasksEveryKind(t *testing.T) {
 	for _, mod := range []struct {
 		esc   string
 		allow bool
-	}{{"golang.org/x/text", true}, {"github.com/relux-works/worker-jail", true}, {"github.com/evil/x", false},
+	}{{"golang.org/x/text", true}, {"github.com/relux-works/remote-workplace", true}, {"github.com/evil/x", false},
 		{"golang.org/x/net/deeper/path", true},
 		{"github.com/relux-works.evil.io/x", false}, {"evil.io/golang.org/x/text", false}} {
 		for _, target := range []string{

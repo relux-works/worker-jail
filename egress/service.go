@@ -1,4 +1,4 @@
-// Package egress is the wj-egress service of worker-jail v2.1 (docs/design/v2/egress.md): one Unix-socket listener per
+// Package egress is the rwp-egress service of remote-workplace v2.1 (docs/design/v2/egress.md): one Unix-socket listener per
 // worker whose policy has a network mode other than none, a strict HTTP/1.1 parser, and one handler family per mode.
 // modules: the Go module proxy and sumdb grammar with the policy's module masks, fixed upstreams and a per-worker cache.
 // allowlist, denylist and all (generic.go): CONNECT and absolute-URI http with host masks and ports, without TLS
@@ -25,7 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/relux-works/worker-jail/jail"
+	"github.com/relux-works/remote-workplace/workplace"
 )
 
 // Timeouts (egress.md §3 and §5).
@@ -50,9 +50,9 @@ var keyRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}\.[a-z0-9][a-z0-9-]{0,31
 
 // Config names the service's three directories.
 type Config struct {
-	SockRoot  string    // one <P>.<W>/egress.sock per served worker; the volume wj-egress-sock
-	PolicyDir string    // <P>.<W>.json, whole policy files; the volume wj-egress-policy, read-only
-	CacheDir  string    // <P>.<W>/ cache namespaces and the control socket; the volume wj-egress-cache
+	SockRoot  string    // one <P>.<W>/egress.sock per served worker; the volume rwp-egress-sock
+	PolicyDir string    // <P>.<W>.json, whole policy files; the volume rwp-egress-policy, read-only
+	CacheDir  string    // <P>.<W>/ cache namespaces and the control socket; the volume rwp-egress-cache
 	Log       io.Writer // JSON lines; default os.Stdout
 }
 
@@ -82,7 +82,7 @@ type Service struct {
 
 // served is a loaded policy with its compiled masks: module masks for modules, the host rule for the generic modes.
 type served struct {
-	pol   jail.Policy
+	pol   workplace.Policy
 	masks masks
 	rule  hostRule
 }
@@ -192,7 +192,7 @@ func (s *Service) Reload() {
 			s.log.event(event{Event: "policy-invalid", Project: m[1], Worker: m[2], File: e.Name(), Error: err.Error()})
 			continue
 		}
-		if sv.pol.Network.Mode == jail.NetNone {
+		if sv.pol.Network.Mode == workplace.NetNone {
 			continue
 		}
 		want[key] = sv
@@ -247,7 +247,7 @@ func (s *Service) sweep(keep map[string]bool) {
 	}
 }
 
-// loadFile reads one policy file and validates it with the jail's own validator, so the loaded id is the host's.
+// loadFile reads one policy file and validates it with the workplace's own validator, so the loaded id is the host's.
 func (s *Service) loadFile(path, project, name string) (*served, error) {
 	fi, err := os.Lstat(path)
 	if err != nil {
@@ -261,11 +261,11 @@ func (s *Service) loadFile(path, project, name string) (*served, error) {
 		return nil, err
 	}
 	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, jail.PolicyMaxBytes+1))
+	data, err := io.ReadAll(io.LimitReader(f, workplace.PolicyMaxBytes+1))
 	if err != nil {
 		return nil, err
 	}
-	pol, err := jail.ParsePolicy(data)
+	pol, err := workplace.ParsePolicy(data)
 	if err != nil {
 		return nil, err
 	}
@@ -274,11 +274,11 @@ func (s *Service) loadFile(path, project, name string) (*served, error) {
 	}
 	sv := &served{pol: pol}
 	switch pol.Network.Mode {
-	case jail.NetModules:
+	case workplace.NetModules:
 		if sv.masks, err = compileMasks(pol.Network.GoModules); err != nil {
 			return nil, err
 		}
-	case jail.NetAllowlist, jail.NetDenylist, jail.NetAll:
+	case workplace.NetAllowlist, workplace.NetDenylist, workplace.NetAll:
 		if sv.rule, err = compileHostRule(pol.Network); err != nil {
 			return nil, err
 		}
@@ -299,7 +299,7 @@ func (s *Service) openWorker(key string, sv *served) (*worker, error) {
 		return nil, err
 	}
 	var c *cache
-	if sv.pol.Network.Mode == jail.NetModules {
+	if sv.pol.Network.Mode == workplace.NetModules {
 		var err error
 		if c, err = openCache(filepath.Join(s.cfg.CacheDir, key), s.workerCap); err != nil {
 			return nil, err
@@ -502,7 +502,7 @@ func (s *Service) modules(w *worker, c net.Conn, req *Request, p modPath, e *Ent
 	if err != nil {
 		return s.deny(c, e, CodeUpstream, p.Upstream)
 	}
-	hreq.Header = http.Header{"User-Agent": {"wj-egress"}} // no client header is forwarded
+	hreq.Header = http.Header{"User-Agent": {"rwp-egress"}} // no client header is forwarded
 	resp, err := s.client.Do(hreq)
 	if err != nil {
 		if errors.Is(err, errGuard) {
@@ -579,17 +579,17 @@ func (s *Service) respond(c net.Conn, e *Entry, status int, body io.Reader, n in
 	return err == nil
 }
 
-// deny writes an in-band denial (egress.md §5): 403 (502 for upstream), X-Worker-Jail-Denied and a one-line body
+// deny writes an in-band denial (egress.md §5): 403 (502 for upstream), X-Remote-Workplace-Denied and a one-line body
 // naming what was denied, never the policy. The connection is closed after it.
 func (s *Service) deny(c net.Conn, e *Entry, code, name string) bool {
 	status, decision := 403, "deny"
 	if code == CodeUpstream {
 		status, decision = 502, "error"
 	}
-	body := "worker-jail egress: denied (" + code + "): " + printable(name, 200) + "\n"
+	body := "remote-workplace egress: denied (" + code + "): " + printable(name, 200) + "\n"
 	e.Decision, e.Code, e.Status, e.BytesOut = decision, code, status, int64(len(body))
 	c.SetWriteDeadline(time.Now().Add(HeaderTimeout))
-	fmt.Fprintf(c, "HTTP/1.1 %d %s\r\nX-Worker-Jail-Denied: %s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+	fmt.Fprintf(c, "HTTP/1.1 %d %s\r\nX-Remote-Workplace-Denied: %s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
 		status, http.StatusText(status), code, len(body), body)
 	return false
 }

@@ -1,7 +1,0 @@
-tools      allowlist: read_file search write_file apply_patch bash  (file settings advisory: bash present; bash masks advisory)
-workspace  read-write; apply accepts internal/ cmd/ docs/
-network    modules: 2 masks; read-only GET/HEAD; covert channel via module paths (rate-limited, logged)
-limits     2 CPUs, 2048 MiB, 512 pids, 600 s, out 4 MiB, disk 4096 MiB soft
-risk       MEDIUM
-reason     modules: covert channel via module paths, bounded by masks, rate and log (MEDIUM)
-policy id  534ff76e9f4ec393041fbc00fb2d774682c941ab919a3c9c76192af8311d9194 (sha256 canonical)

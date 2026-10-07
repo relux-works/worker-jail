@@ -1,4 +1,4 @@
-# How OpenAI Codex jails its own models (research, 2026-09-29)
+# How OpenAI Codex workplaces its own models (research, 2026-09-29)
 
 ## Sources
 - Repo: https://github.com/openai/codex, shallow clone in `./src`, commit `18194bfd3534ca567d886eac454028dafaa68b6c` (2026-09-29 15:10 UTC). Code citations below are relative to `src/codex-rs/`.
@@ -96,7 +96,7 @@ Everything in this section comes from the docs. The cloud runtime is not in the 
 - Open issues. These are reporter claims, not confirmed: #44964: admin `prefix_rules` don't fire for nested shell scripts (`zsh -c`); #37405: allowlisted commands lose their bypass in compound commands.
 - Safety monitoring can pause a task asynchronously, possibly after the harmful action; it does not replace the sandbox (AAS l.44-52).
 
-## 7. Relevant to worker-jail
+## 7. Relevant to remote-workplace
 Legend: [F] = fact from source; [I] = my inference.
 
 **(a) Allowlisted egress proxy**
@@ -106,7 +106,7 @@ Legend: [F] = fact from source; [I] = my inference.
 - [F] GET/HEAD/OPTIONS-only mode requires MITM for HTTPS; the cloud offers the same knob.
 - [F] Codex's own docs call domain allowlisting best-effort against DNS rebinding and recommend lower-layer enforcement. [I] Pin resolved IPs at connect time, as `connect_policy.rs` does, and refuse raw TCP/UDP that doesn't go through the proxy.
 - [F] Cloud "Common dependencies" includes very broad domains (github.com, githubusercontent.com, google.com). The docs' own exfil demo is a POST to an arbitrary host. [I] Method restriction plus narrow domains matter more than the preset.
-- [F] Credential broker: children see dummy secrets and the proxy injects the real ones for matched hosts. [I] This model fits jailed workers that need API tokens without being able to read them.
+- [F] Credential broker: children see dummy secrets and the proxy injects the real ones for matched hosts. [I] This model fits workplace workers that need API tokens without being able to read them.
 - [F] Proxy decisions are logged per host/port/method without URLs.
 
 **(b) Protected paths**
@@ -118,7 +118,7 @@ Legend: [F] = fact from source; [I] = my inference.
 **(c) Environment scrubbing**
 - [F] The local default inherits the **whole** env, and the KEY/SECRET/TOKEN filter is off by default. Only 5 internal Codex tokens are always stripped.
 - [F] The cloud drops secrets before the agent phase (setup-only secrets).
-- [I] Codex's local default is weak. worker-jail should start from an allowlist (like `inherit=core`) and not copy Codex's local default.
+- [I] Codex's local default is weak. remote-workplace should start from an allowlist (like `inherit=core`) and not copy Codex's local default.
 
 **(d) Approvals**
 - [F] Approvals are a separate layer from the sandbox. The `untrusted` config value is retired and `on-failure` is just an alias for `on-request`.
@@ -127,4 +127,4 @@ Legend: [F] = fact from source; [I] = my inference.
 - [F] Allow rules bypass the sandbox only when every segment of a split `bash -lc` script matches.
 - [F] Deny-read policies disable all sandbox bypasses.
 - [F] The optional LLM auto-reviewer fails closed, and async monitoring may pause a task only after the fact.
-- [I] Prefix-rule matching on shell text is bypassable (open issue #44964). worker-jail should not lean on command-prefix approvals as a security boundary; the kernel/proxy layer must hold on its own.
+- [I] Prefix-rule matching on shell text is bypassable (open issue #44964). remote-workplace should not lean on command-prefix approvals as a security boundary; the kernel/proxy layer must hold on its own.

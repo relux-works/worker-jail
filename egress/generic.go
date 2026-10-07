@@ -19,7 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/relux-works/worker-jail/jail"
+	"github.com/relux-works/remote-workplace/workplace"
 )
 
 // Limits of a generic exchange (egress.md §4): a tunnel or a response stream ends after IdleTimeout without a byte in
@@ -46,10 +46,10 @@ const (
 type hostRule struct {
 	mode  string
 	hosts masks
-	ports jail.PortSet
+	ports workplace.PortSet
 }
 
-func compileHostRule(n jail.NetworkPolicy) (hostRule, error) {
+func compileHostRule(n workplace.NetworkPolicy) (hostRule, error) {
 	r := hostRule{mode: n.Mode}
 	if n.Ports != nil {
 		r.ports = *n.Ports
@@ -65,15 +65,15 @@ func compileHostRule(n jail.NetworkPolicy) (hostRule, error) {
 func (r hostRule) check(host string, port int) string {
 	matched := slices.ContainsFunc(r.hosts, func(re *regexp.Regexp) bool { return re.MatchString(host) })
 	switch r.mode {
-	case jail.NetAllowlist:
+	case workplace.NetAllowlist:
 		if !matched {
 			return CodeHost
 		}
-	case jail.NetDenylist:
+	case workplace.NetDenylist:
 		if matched {
 			return CodeHost
 		}
-	case jail.NetAll:
+	case workplace.NetAll:
 	default:
 		return CodeMode
 	}

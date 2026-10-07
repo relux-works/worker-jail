@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/relux-works/worker-jail/jail"
+	"github.com/relux-works/remote-workplace/workplace"
 )
 
 // Denial codes (egress.md §5).
@@ -35,8 +35,8 @@ const (
 // GET and HEAD are method (a generic listener forwards no request body). On a listener of any other mode every request
 // is mode (no such listener is opened; this is the second line of defence).
 func route(mode string, req *Request) (handler, code string) {
-	generic := mode == jail.NetAllowlist || mode == jail.NetDenylist || mode == jail.NetAll
-	if mode != jail.NetModules && !generic {
+	generic := mode == workplace.NetAllowlist || mode == workplace.NetDenylist || mode == workplace.NetAll
+	if mode != workplace.NetModules && !generic {
 		return "", CodeMode
 	}
 	h := ""
@@ -267,7 +267,7 @@ func unescape(s string) (string, bool) {
 	return b.String(), true
 }
 
-// masks are a policy's go_modules, anchored as the jail matches them: ^(?:mask)$.
+// masks are a policy's go_modules, anchored as the workplace matches them: ^(?:mask)$.
 type masks []*regexp.Regexp
 
 func compileMasks(ms []string) (masks, error) {

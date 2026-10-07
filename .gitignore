@@ -2,3 +2,5 @@
 .task-board/
 task-board.config.json
 bin/
+
+.codex/hooks.json
