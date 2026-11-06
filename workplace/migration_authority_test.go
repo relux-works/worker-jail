@@ -58,10 +58,11 @@ func TestMigrationPublicRootAuthority(t *testing.T) {
 				if !canonical {
 					state = t.TempDir()
 				}
-				j, err := New(Config{StateDir: state, Docker: d})
+				j, err := New(Config{StateDir: state, Docker: d, Colima: fakeColima{mounts: fixtureMounts(t)}})
 				if err != nil {
 					t.Fatal(err)
 				}
+				j.home = fixtureHome
 				if !canonical {
 					writeFile(t, filepath.Join(state, migrationReceipt), string(receipt))
 					policy, err := os.ReadFile(filepath.Join(f.spec.SourceStateDir, "policies/p.w.json"))
